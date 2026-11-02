@@ -266,13 +266,15 @@ SNOOP_COLD uint32_t snoop_poll(snoop_t *s, uint32_t now_us, uint32_t now_stamp)
    uint32_t taken = 0;
    uint32_t tail = hot->tail;
    const uint32_t head = hot->head;
+   SNOOP_BARRIER();          /* no entry is read before head */
    const uint32_t used = (head - tail) & (SNOOP_RING - 1);
    if (used > s->ring_hiwater) s->ring_hiwater = used;
    while (tail != head)
    {
       const snoop_ev_t e = hot->ring[tail];
       tail = (tail + 1) & (SNOOP_RING - 1);
-      hot->tail = tail;           /* hand the slot back at once */
+      SNOOP_BARRIER();            /* the entry is copied before its slot is handed back */
+      hot->tail = tail;
       advance(s, e.stamp);
       add_write(s, e.addr, e.data, s->c64_time, now_us);
       taken++;

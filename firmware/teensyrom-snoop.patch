@@ -243,10 +243,10 @@ index 0000000..10ffd20
 +#endif
 diff --git a/Source/Teensy/snoop/snoop.c b/Source/Teensy/snoop/snoop.c
 new file mode 100644
-index 0000000..2ee27f1
+index 0000000..48a5f75
 --- /dev/null
 +++ b/Source/Teensy/snoop/snoop.c
-@@ -0,0 +1,301 @@
+@@ -0,0 +1,303 @@
 +/* teensyrom-snoop: main-loop side.  See snoop.h and docs/PROTOCOL.md. */
 +#include "snoop.h"
 +#include <string.h>
@@ -515,13 +515,15 @@ index 0000000..2ee27f1
 +   uint32_t taken = 0;
 +   uint32_t tail = hot->tail;
 +   const uint32_t head = hot->head;
++   SNOOP_BARRIER();          /* no entry is read before head */
 +   const uint32_t used = (head - tail) & (SNOOP_RING - 1);
 +   if (used > s->ring_hiwater) s->ring_hiwater = used;
 +   while (tail != head)
 +   {
 +      const snoop_ev_t e = hot->ring[tail];
 +      tail = (tail + 1) & (SNOOP_RING - 1);
-+      hot->tail = tail;           /* hand the slot back at once */
++      SNOOP_BARRIER();            /* the entry is copied before its slot is handed back */
++      hot->tail = tail;
 +      advance(s, e.stamp);
 +      add_write(s, e.addr, e.data, s->c64_time, now_us);
 +      taken++;
@@ -550,10 +552,10 @@ index 0000000..2ee27f1
 +}
 diff --git a/Source/Teensy/snoop/snoop.h b/Source/Teensy/snoop/snoop.h
 new file mode 100644
-index 0000000..69d2bca
+index 0000000..273f087
 --- /dev/null
 +++ b/Source/Teensy/snoop/snoop.h
-@@ -0,0 +1,184 @@
+@@ -0,0 +1,194 @@
 +/* teensyrom-snoop: capture C64 bus writes to chosen addresses and stream them.
 + *
 + * Portable C99, also compiled as C++ by the TeensyROM firmware (keep it C++-clean).
@@ -636,6 +638,15 @@ index 0000000..69d2bca
 +   snoop_ev_t        ring[SNOOP_RING];
 +} snoop_hot_t;
 +
++/* Compiler barrier.  The ISR and the main loop share one core, so no CPU fence is needed, but the
++ * compiler may move the plain ring accesses across the volatile head/tail ones (GCC 13 did put the
++ * entry's stores after the head store in SnoopTap). */
++#if defined(__GNUC__) || defined(__clang__)
++#define SNOOP_BARRIER() __asm__ __volatile__("" ::: "memory")
++#else
++#define SNOOP_BARRIER() do {} while (0)
++#endif
++
 +/* ---- ISR side ------------------------------------------------------------------------------- */
 +
 +/* Second-level test, after the caller saw hot->page[addr >> 8] != 0. */
@@ -655,6 +666,7 @@ index 0000000..69d2bca
 +   e->stamp = stamp;
 +   e->addr = addr;
 +   e->data = data;
++   SNOOP_BARRIER();          /* the entry is complete before head says so */
 +   hot->head = next;
 +}
 +

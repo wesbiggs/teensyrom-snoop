@@ -80,6 +80,15 @@ typedef struct {
    snoop_ev_t        ring[SNOOP_RING];
 } snoop_hot_t;
 
+/* Compiler barrier.  The ISR and the main loop share one core, so no CPU fence is needed, but the
+ * compiler may move the plain ring accesses across the volatile head/tail ones (GCC 13 did put the
+ * entry's stores after the head store in SnoopTap). */
+#if defined(__GNUC__) || defined(__clang__)
+#define SNOOP_BARRIER() __asm__ __volatile__("" ::: "memory")
+#else
+#define SNOOP_BARRIER() do {} while (0)
+#endif
+
 /* ---- ISR side ------------------------------------------------------------------------------- */
 
 /* Second-level test, after the caller saw hot->page[addr >> 8] != 0. */
@@ -99,6 +108,7 @@ static inline void snoop_isr_store(snoop_hot_t *hot, uint16_t addr, uint8_t data
    e->stamp = stamp;
    e->addr = addr;
    e->data = data;
+   SNOOP_BARRIER();          /* the entry is complete before head says so */
    hot->head = next;
 }
 
