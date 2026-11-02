@@ -27,9 +27,13 @@ test-fw: | build/inc/snoop
 test-core: build/libsnoop.so
 	$(PYTHON) -m unittest -v tests/test_core.py
 
-test: check-cxx test-core test-fw
+# the reSIDfp player (skipped without pip install pyresidfp numpy)
+test-player:
+	$(PYTHON) -m unittest -v tests/test_sidplay.py
+
+test: check-cxx test-core test-fw test-player
 
 clean:
 	rm -rf build
 
-.PHONY: all check-cxx test-core test-fw test clean
+.PHONY: all check-cxx test-core test-fw test-player test clean

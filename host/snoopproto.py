@@ -256,6 +256,49 @@ def status_command() -> bytes:
     return bytes([CMD_LEAD, CMD_SNOOP, OP_STATUS])
 
 
+# ---- encoding (the firmware's side, for tests, fake devices and file conversion) ----------------
+
+def put_varint(v: int) -> bytes:
+    out = bytearray()
+    while True:
+        b = v & 0x7F
+        v >>= 7
+        out.append(b | (0x80 if v else 0))
+        if not v:
+            return bytes(out)
+
+
+def frame(payload: bytes) -> bytes:
+    """One wire frame: 00 COBS(payload + crc16 LE) 00."""
+    crc = crc16(payload)
+    return b"\x00" + cobs_encode(payload + bytes([crc & 0xFF, crc >> 8])) + b"\x00"
+
+
+def hello_payload(ranges, phi2_hz=PHI2_PAL, cpu_hz=600_000_000, max_gap=32) -> bytes:
+    p = struct.pack("<BBIIBB", F_HELLO, PROTO_VERSION, phi2_hz, cpu_hz, max_gap, len(ranges))
+    return p + b"".join(struct.pack("<HH", a, b) for a, b in ranges)
+
+
+def writes_payload(seq: int, blocks) -> bytes:
+    """blocks: (time, addr, data) with ascending times; t0 = the first block's time."""
+    p = bytearray(struct.pack("<BH", F_WRITES, seq & 0xFFFF))
+    prev = blocks[0][0]
+    p += put_varint(prev)
+    for t, addr, data in blocks:
+        p += put_varint(t - prev) + struct.pack("<HB", addr, len(data)) + bytes(data)
+        prev = t
+    return bytes(p)
+
+
+def status_payload(next_seq, time, dropped=0, out_dropped=0, hiwater=0, writes=0) -> bytes:
+    return (struct.pack("<BH", F_STATUS, next_seq & 0xFFFF) + put_varint(time)
+            + struct.pack("<IIHI", dropped, out_dropped, hiwater, writes))
+
+
+def bye_payload(reason=0) -> bytes:
+    return bytes([F_BYE, reason])
+
+
 def writes_of(frames) -> list[tuple[int, int, int]]:
     """Expand WRITES frames to (time, addr, value) per byte; times inside a block are the block's."""
     out = []
