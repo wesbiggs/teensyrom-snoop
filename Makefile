@@ -31,9 +31,22 @@ test-core: build/libsnoop.so
 test-player:
 	$(PYTHON) -m unittest -v tests/test_sidplay.py
 
-test: check-cxx test-core test-fw test-player
+# real tunes end to end (skipped without py65 + pyresidfp + a TeensyROM checkout: TEENSYROM=...)
+TEENSYROM ?= ../3p/TeensyROM
+test-e2e: build/libsnoop.so
+	TEENSYROM=$(TEENSYROM) $(PYTHON) -m unittest -v tests/test_e2e.py
+
+test: check-cxx test-core test-fw test-player test-e2e
+
+# WAVs of a few of the TeensyROM's bundled tunes, through capture -> wire -> reSIDfp (no hardware)
+DEMO_TUNES ?= Aces_High Echoes Switch_625 Popcorn
+demo: build/libsnoop.so
+	mkdir -p build/demo
+	for t in $(DEMO_TUNES); do \
+	  $(PYTHON) tools/sidtrace.py $(TEENSYROM)/Source/Teensy/TRMenuFiles/SIDs/$$t.sid.h --seconds 30 --gap 0 --snoop build/demo/$$t.snoop && \
+	  $(PYTHON) host/trsid.py --replay build/demo/$$t.snoop --wav build/demo/$$t.wav; done
 
 clean:
 	rm -rf build
 
-.PHONY: all check-cxx test-core test-fw test-player test clean
+.PHONY: all check-cxx test-core test-fw test-player test-e2e test demo clean

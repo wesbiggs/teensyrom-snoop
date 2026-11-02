@@ -11,9 +11,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: snoop
+      - name: Pinned upstream (its bundled SID tunes feed the end-to-end test)
+        id: up
+        run: echo "sha=$(cat snoop/firmware/UPSTREAM)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: SensoriumEmbedded/TeensyROM
+          ref: ${{ steps.up.outputs.sha }}
+          path: tr
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - run: sudo apt-get update && sudo apt-get install -y clang
+      - run: pip install pyresidfp numpy py65
       - name: make test
-        run: make test CC=clang CXX=clang++
+        working-directory: snoop
+        run: make test CC=clang CXX=clang++ TEENSYROM=$GITHUB_WORKSPACE/tr
 
   firmware:
     # the patch on the pinned upstream TeensyROM (firmware/UPSTREAM), built for the TR+ like upstream's CI

@@ -235,7 +235,7 @@ def parse_range(text: str) -> tuple[int, int]:
     return first, last
 
 
-def start_command(ranges: list[tuple[int, int]], max_gap: int = 32) -> bytes:
+def start_command(ranges: list[tuple[int, int]], max_gap: int = 0) -> bytes:
     if not 1 <= len(ranges) <= 16:
         raise ValueError("1 to 16 ranges")
     if not 0 <= max_gap <= 255:

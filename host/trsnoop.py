@@ -119,7 +119,7 @@ def main():
     g.add_argument("--replay", help="decode a file written with --raw")
     ap.add_argument("--tcp-port", type=int, default=2112)
     ap.add_argument("--range", action="append", default=[], help="hex address or range (repeatable)")
-    ap.add_argument("--gap", type=int, default=32, help="C64 cycles a write may follow the previous one and still join its block (0 = every write its own block)")
+    ap.add_argument("--gap", type=int, default=0, help="C64 cycles a write may follow the previous one and still join its block, sharing its time; 0 (default) = every write exactly timed. For the SID keep 0: see README")
     ap.add_argument("--raw", help="also write the received bytes to this file")
     ap.add_argument("--seconds", type=float, default=0, help="stop after this long (0 = until Ctrl-C)")
     ap.add_argument("--quiet", action="store_true", help="only HELLO/STATUS/BYE lines")
