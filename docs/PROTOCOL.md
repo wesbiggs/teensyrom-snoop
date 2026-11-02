@@ -55,7 +55,9 @@ Starts a run. Time 0 is the start command; `phi2_hz` is the C64 clock the times 
 * A block is a run of writes to **consecutive ascending** addresses `addr, addr+1, ...`, each no more
   than `gap` C64 cycles after the previous one. Its time is that of its **first** write: the later bytes
   are up to `gap` cycles later each. `gap` = 0 makes every write its own block, so every write has its
-  own exact time.
+  own exact time. Use 0 for anything timing-sensitive, such as the SID: on real tunes a gap of 32 moved
+  writes by up to ~30 cycles, and the rendered audio differed from the exact version by 14-44 dB SNR
+  (README). The host tools default to 0.
 * Block time = previous block's time + `dt`; the first block's `dt` is from `t0` (0 in practice).
 * Times are C64 cycles since the start, exact to the cycle (the Teensy stamps each write at phi2's
   rising edge; the conversion carries its remainder, so it never drifts against the nominal clock).

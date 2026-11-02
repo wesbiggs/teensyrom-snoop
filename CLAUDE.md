@@ -1,25 +1,32 @@
 # CLAUDE.md — teensyrom-snoop
 
 Capture C64 bus writes to chosen addresses in the TeensyROM+ phi2 ISR and stream them (COBS + CRC-16
-frames, cycle times) over USB serial / TCP. Read `README.md` and `docs/PROTOCOL.md` first.
+frames, exact cycle times) over USB serial / TCP; `host/trsid.py` plays SID writes through reSIDfp.
+Read `README.md` (status table, decisions) and `docs/PROTOCOL.md` first; `docs/USB-AUDIO.md` is phase 2.
 
 ## Rules
 * `core/` is C99 and must stay C++-clean (the firmware compiles it as C++). Every function is `SNOOP_COLD`
   (FLASHMEM on the Teensy: code defaults to RAM1 there, which is scarce). Only `snoop_isr_match` /
   `snoop_isr_store` (inline) and `SnoopTap` run in the ISR; `snoop_hot_t` must stay in DTCM.
-* Keep the ISR hook a single byte-load test. After any change near it, check the `isrPHI2` prologue in
-  the disassembly (CI prints it): in teensyrom-vdrive one extra test in the snoop path made GCC save six
+  Keep `SNOOP_BARRIER()` around the ring's head/tail updates (GCC moved the entry stores past head without it).
+* Keep the ISR hook a single byte-load test. After any change near it, check the `isrPHI2` prologue:
+  `tools/armcheck/build.sh` prints the saved registers (stock: `{r3-r9, sl, fp, lr}`), CI prints the
+  Teensyduino build's disassembly. In teensyrom-vdrive one extra test in the snoop path made GCC save six
   registers on every cycle and corrupted bus reads.
-* After changing `core/` or `firmware/`, run `tools/make_tr_patch.py <pristine TeensyROM at firmware/UPSTREAM>`
+* After changing `core/` or `firmware/`, run `tools/make_tr_patch.py <TeensyROM checkout at firmware/UPSTREAM>`
   and commit the patch; CI fails when it is stale. Keep the hunks off the lines teensyrom-vdrive's patch edits
-  (both must apply in either order).
-* Protocol changes: bump `SNOOP_PROTO_VERSION` and `PROTO_VERSION` in `host/snoopproto.py`, update docs/PROTOCOL.md.
-* No Commodore ROM bytes in the repo.
+  (both must apply in either order; check with `git apply` on a `git archive` tree).
+* Protocol changes: bump `SNOOP_PROTO_VERSION` and `PROTO_VERSION` in `host/snoopproto.py`, update docs/PROTOCOL.md
+  and both the C encoder and the Python encoder (tests use the Python one to build streams).
+* No Commodore ROM bytes and no SID tunes in the repo: tests read the TeensyROM checkout's bundled tunes (`TEENSYROM=`).
 
 ## Commands
-* `make test` — core via ctypes, C++ syntax check, firmware glue against host stubs. Needs cc/c++, Python 3.
+* `make test` — core via ctypes, C++ syntax check, firmware glue against host stubs, the player, real tunes end to end
+  (the last two skip without `pip install pyresidfp numpy py65` / a TeensyROM checkout, default `../3p/TeensyROM`).
+* `make demo` — WAVs of bundled tunes in `build/demo/` (capture -> wire -> reSIDfp, no hardware).
 * `make build/libsnoop.so` before running `tests/test_core.py` alone (ctypes loads it).
+* `tools/armcheck/build.sh <3p> <TeensyROM> <name> [patches]` — ARM compile + isrPHI2 saved registers.
 
 ## Status
-Host-tested only. No firmware build here (pjrc.com is not reachable from the cloud container; CI builds it),
-no hardware run yet.
+Host-tested and ARM-compiled (GCC 13, GitHub sources). No Teensyduino build here (pjrc.com is not reachable
+from the cloud container; CI builds it), no hardware run yet.
