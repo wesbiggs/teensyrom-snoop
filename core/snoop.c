@@ -193,17 +193,13 @@ SNOOP_COLD void snoop_status(snoop_t *s)
    s->ring_hiwater = 0;
 }
 
-SNOOP_COLD int snoop_start(snoop_t *s, const snoop_range_t *ranges, uint8_t nranges, uint8_t max_gap,
-                           uint32_t phi2_hz, uint32_t cpu_hz, uint32_t now_us, uint32_t now_stamp)
+/* Page map for the ranges; 0 or an error (see snoop_start). */
+static SNOOP_COLD int build_pmap(const snoop_range_t *ranges, uint8_t nranges, uint8_t pmap[256])
 {
    if (nranges == 0 || nranges > SNOOP_MAX_RANGES) return -1;
    for (uint8_t i = 0; i < nranges; i++) if (ranges[i].first > ranges[i].last) return -2;
-   if (phi2_hz == 0 || cpu_hz == 0) return -1;
-
-   /* pages first, so a refused start leaves a running capture alone */
-   uint8_t pmap[256];
    uint8_t npages = 0;
-   memset(pmap, 0, sizeof pmap);
+   memset(pmap, 0, 256);
    for (uint8_t i = 0; i < nranges; i++)
       for (uint32_t pg = ranges[i].first >> 8; pg <= (uint32_t)(ranges[i].last >> 8); pg++)
          if (!pmap[pg])
@@ -211,6 +207,23 @@ SNOOP_COLD int snoop_start(snoop_t *s, const snoop_range_t *ranges, uint8_t nran
             if (npages == SNOOP_POOL_PAGES) return -3;
             pmap[pg] = ++npages;
          }
+   return 0;
+}
+
+SNOOP_COLD int snoop_check(const snoop_range_t *ranges, uint8_t nranges)
+{
+   uint8_t pmap[256];
+   return build_pmap(ranges, nranges, pmap);
+}
+
+SNOOP_COLD int snoop_start(snoop_t *s, const snoop_range_t *ranges, uint8_t nranges, uint8_t max_gap,
+                           uint32_t phi2_hz, uint32_t cpu_hz, uint32_t now_us, uint32_t now_stamp)
+{
+   /* checks first, so a refused start leaves a running capture alone */
+   uint8_t pmap[256];
+   const int err = build_pmap(ranges, nranges, pmap);
+   if (err) return err;
+   if (phi2_hz == 0 || cpu_hz == 0) return -1;
 
    if (s->running) snoop_stop(s, SNOOP_BYE_REPLACED, now_us, now_stamp);
 

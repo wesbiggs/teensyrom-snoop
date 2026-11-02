@@ -145,12 +145,15 @@ the registers `isrPHI2` saves (see the script for the repositories it needs).
    The real crystal's ppm offset is not tracked.
 6. **Limits:** a 512-entry ring, about 0.5 s of a busy tune if `loop()` stalls (a long file transfer
    command); losses are counted in STATUS. Up to 16 ranges / 16 pages, and an 8 KB output FIFO.
-7. **What is not seen:** the TeensyROM's own DMA writes (an REU into `$D400`, the remote memory
+7. **A capture ends when the TeensyROM leaves its main image** (a reboot, a firmware update, or a launch that
+   switches to the minimal image): the USB or TCP connection drops with it, and the client reports a closed
+   connection. It survives the C64's resets and program launches from the menu.
+8. **What is not seen:** the TeensyROM's own DMA writes (an REU into `$D400`, the remote memory
    writes), a C128's `$00/$01` writes during the DMA HIRAM sense, and the REU's `$FF00` trigger.
    These are the cycles where the earlier snoops end the ISR.
-8. **The player uses reSIDfp through pyresidfp (GPL-2.0+)** as a run-time dependency, not shipped.
+9. **The player uses reSIDfp through pyresidfp (GPL-2.0+)** as a run-time dependency, not shipped.
    The model defaults to 6581 because the stream does not say which chip (the C64 has none).
-9. **No licence file yet:** that is the owner's call. The TeensyROM is MIT, and the patch adds files under it.
+10. **No licence file yet:** that is the owner's call. The TeensyROM is MIT, and the patch adds files under it.
 
 ## Next
 

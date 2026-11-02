@@ -146,6 +146,15 @@ int main()
    Dump("build/fw_serial.bin", Serial);
    for (int k = 0; k < 5; k++) { Cycle(0xD418, false, (uint8_t)(0xF0 + k)); Cycle(0xDE00, false, (uint8_t)k); }
    Loop(10);
+   // 2b. a refused start from another channel leaves the TCP run alone
+   {
+      Stream Third;
+      Command(&Third, {0x64, 0x53, 1, 1, 0x00, 0x00, 0xFF, 0xFF, 0, 0});
+      CHECK(Third.out.size() >= 2 && Third.out[0] == 0x7F && Third.out[1] == 0x9B);
+      CHECK(SnoopState.running && SnoopOut == &tcpClient);
+   }
+   Cycle(0xD418, false, 0xAA);
+   Loop(10);
    // 3. the TCP client goes away: the run stops by itself
    tcpClient.up = false;
    Loop();

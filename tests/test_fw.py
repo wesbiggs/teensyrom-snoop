@@ -42,8 +42,8 @@ class Glue(unittest.TestCase):
         self.assertEqual(fr[0].max_gap, 0)
         w = sp.writes_of(fr)
         self.assertEqual([(a, v) for _, a, v in w],
-                         [x for k in range(5) for x in ((0xD418, 0xF0 + k), (0xDE00, k))])
-        self.assertEqual([t2 - t1 for (t1, _, _), (t2, _, _) in zip(w, w[1:])], [1] * 9)
+                         [x for k in range(5) for x in ((0xD418, 0xF0 + k), (0xDE00, k))] + [(0xD418, 0xAA)])
+        self.assertEqual([t2 - t1 for (t1, _, _), (t2, _, _) in zip(w[:10], w[1:10])], [1] * 9)
         self.assertNotIsInstance(fr[-1], sp.Bye)    # the channel went away: nothing more sent
 
     def test_ntsc_and_stop(self):

@@ -166,6 +166,9 @@ void snoop_init(snoop_t *s, snoop_hot_t *hot);
 int  snoop_start(snoop_t *s, const snoop_range_t *ranges, uint8_t nranges, uint8_t max_gap,
                  uint32_t phi2_hz, uint32_t cpu_hz, uint32_t now_us, uint32_t now_stamp);
 
+/* The checks snoop_start makes on the ranges, without touching anything: 0 or its error code. */
+int  snoop_check(const snoop_range_t *ranges, uint8_t nranges);
+
 /* Stop capturing (page map cleared first), drain what the ring holds, send STATUS and BYE. */
 void snoop_stop(snoop_t *s, uint8_t reason, uint32_t now_us, uint32_t now_stamp);
 

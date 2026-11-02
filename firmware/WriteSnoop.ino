@@ -99,12 +99,16 @@ FLASHMEM void SnoopCommand()
    if (!SnoopGetByte(&Gap) || !SnoopGetByte(&Flags)) return;
    (void)Flags;
 
-   if (SnoopState.running && SnoopOut != CmdChannel)
-   {  // a start from another channel: the old one gets its BYE first
-      snoop_stop(&SnoopState, SNOOP_BYE_REPLACED, micros(), ARM_DWT_CYCCNT);
-      SnoopFlushTo(SnoopOut, 200);
+   int Res = snoop_check(Ranges, N);   // before anything stops: a refused start leaves a running capture alone
+   if (Res == 0)
+   {
+      if (SnoopState.running && SnoopOut != CmdChannel)
+      {  // a start from another channel: the old one gets its BYE first
+         snoop_stop(&SnoopState, SNOOP_BYE_REPLACED, micros(), ARM_DWT_CYCCNT);
+         SnoopFlushTo(SnoopOut, 200);
+      }
+      Res = snoop_start(&SnoopState, Ranges, N, Gap, SnoopPhi2Hz(), F_CPU_ACTUAL, micros(), ARM_DWT_CYCCNT);
    }
-   const int Res = snoop_start(&SnoopState, Ranges, N, Gap, SnoopPhi2Hz(), F_CPU_ACTUAL, micros(), ARM_DWT_CYCCNT);
    if (Res != 0)
    {
       SendU16(FailToken);

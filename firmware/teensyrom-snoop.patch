@@ -101,10 +101,10 @@ index 0000000..0555a91
 +#endif
 diff --git a/Source/Teensy/WriteSnoop.ino b/Source/Teensy/WriteSnoop.ino
 new file mode 100644
-index 0000000..b972b0e
+index 0000000..bf5b0c8
 --- /dev/null
 +++ b/Source/Teensy/WriteSnoop.ino
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,151 @@
 +// teensyrom-snoop: the main-loop half.  Command 0x6453 from the USB serial or TCP channel, and
 +// SnoopService() from loop().  Protocol: docs/PROTOCOL.md in teensyrom-snoop.
 +
@@ -206,12 +206,16 @@ index 0000000..b972b0e
 +   if (!SnoopGetByte(&Gap) || !SnoopGetByte(&Flags)) return;
 +   (void)Flags;
 +
-+   if (SnoopState.running && SnoopOut != CmdChannel)
-+   {  // a start from another channel: the old one gets its BYE first
-+      snoop_stop(&SnoopState, SNOOP_BYE_REPLACED, micros(), ARM_DWT_CYCCNT);
-+      SnoopFlushTo(SnoopOut, 200);
++   int Res = snoop_check(Ranges, N);   // before anything stops: a refused start leaves a running capture alone
++   if (Res == 0)
++   {
++      if (SnoopState.running && SnoopOut != CmdChannel)
++      {  // a start from another channel: the old one gets its BYE first
++         snoop_stop(&SnoopState, SNOOP_BYE_REPLACED, micros(), ARM_DWT_CYCCNT);
++         SnoopFlushTo(SnoopOut, 200);
++      }
++      Res = snoop_start(&SnoopState, Ranges, N, Gap, SnoopPhi2Hz(), F_CPU_ACTUAL, micros(), ARM_DWT_CYCCNT);
 +   }
-+   const int Res = snoop_start(&SnoopState, Ranges, N, Gap, SnoopPhi2Hz(), F_CPU_ACTUAL, micros(), ARM_DWT_CYCCNT);
 +   if (Res != 0)
 +   {
 +      SendU16(FailToken);
@@ -254,10 +258,10 @@ index 0000000..b972b0e
 +#endif
 diff --git a/Source/Teensy/snoop/snoop.c b/Source/Teensy/snoop/snoop.c
 new file mode 100644
-index 0000000..48a5f75
+index 0000000..6614552
 --- /dev/null
 +++ b/Source/Teensy/snoop/snoop.c
-@@ -0,0 +1,303 @@
+@@ -0,0 +1,316 @@
 +/* teensyrom-snoop: main-loop side.  See snoop.h and docs/PROTOCOL.md. */
 +#include "snoop.h"
 +#include <string.h>
@@ -453,17 +457,13 @@ index 0000000..48a5f75
 +   s->ring_hiwater = 0;
 +}
 +
-+SNOOP_COLD int snoop_start(snoop_t *s, const snoop_range_t *ranges, uint8_t nranges, uint8_t max_gap,
-+                           uint32_t phi2_hz, uint32_t cpu_hz, uint32_t now_us, uint32_t now_stamp)
++/* Page map for the ranges; 0 or an error (see snoop_start). */
++static SNOOP_COLD int build_pmap(const snoop_range_t *ranges, uint8_t nranges, uint8_t pmap[256])
 +{
 +   if (nranges == 0 || nranges > SNOOP_MAX_RANGES) return -1;
 +   for (uint8_t i = 0; i < nranges; i++) if (ranges[i].first > ranges[i].last) return -2;
-+   if (phi2_hz == 0 || cpu_hz == 0) return -1;
-+
-+   /* pages first, so a refused start leaves a running capture alone */
-+   uint8_t pmap[256];
 +   uint8_t npages = 0;
-+   memset(pmap, 0, sizeof pmap);
++   memset(pmap, 0, 256);
 +   for (uint8_t i = 0; i < nranges; i++)
 +      for (uint32_t pg = ranges[i].first >> 8; pg <= (uint32_t)(ranges[i].last >> 8); pg++)
 +         if (!pmap[pg])
@@ -471,6 +471,23 @@ index 0000000..48a5f75
 +            if (npages == SNOOP_POOL_PAGES) return -3;
 +            pmap[pg] = ++npages;
 +         }
++   return 0;
++}
++
++SNOOP_COLD int snoop_check(const snoop_range_t *ranges, uint8_t nranges)
++{
++   uint8_t pmap[256];
++   return build_pmap(ranges, nranges, pmap);
++}
++
++SNOOP_COLD int snoop_start(snoop_t *s, const snoop_range_t *ranges, uint8_t nranges, uint8_t max_gap,
++                           uint32_t phi2_hz, uint32_t cpu_hz, uint32_t now_us, uint32_t now_stamp)
++{
++   /* checks first, so a refused start leaves a running capture alone */
++   uint8_t pmap[256];
++   const int err = build_pmap(ranges, nranges, pmap);
++   if (err) return err;
++   if (phi2_hz == 0 || cpu_hz == 0) return -1;
 +
 +   if (s->running) snoop_stop(s, SNOOP_BYE_REPLACED, now_us, now_stamp);
 +
@@ -563,10 +580,10 @@ index 0000000..48a5f75
 +}
 diff --git a/Source/Teensy/snoop/snoop.h b/Source/Teensy/snoop/snoop.h
 new file mode 100644
-index 0000000..273f087
+index 0000000..174959f
 --- /dev/null
 +++ b/Source/Teensy/snoop/snoop.h
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,197 @@
 +/* teensyrom-snoop: capture C64 bus writes to chosen addresses and stream them.
 + *
 + * Portable C99, also compiled as C++ by the TeensyROM firmware (keep it C++-clean).
@@ -734,6 +751,9 @@ index 0000000..273f087
 + * is stopped first (BYE REPLACED).  now_us is the glue's microsecond clock. */
 +int  snoop_start(snoop_t *s, const snoop_range_t *ranges, uint8_t nranges, uint8_t max_gap,
 +                 uint32_t phi2_hz, uint32_t cpu_hz, uint32_t now_us, uint32_t now_stamp);
++
++/* The checks snoop_start makes on the ranges, without touching anything: 0 or its error code. */
++int  snoop_check(const snoop_range_t *ranges, uint8_t nranges);
 +
 +/* Stop capturing (page map cleared first), drain what the ring holds, send STATUS and BYE. */
 +void snoop_stop(snoop_t *s, uint8_t reason, uint32_t now_us, uint32_t now_stamp);
