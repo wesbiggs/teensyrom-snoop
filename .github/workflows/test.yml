@@ -1,0 +1,77 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y clang
+      - name: make test
+        run: make test CC=clang CXX=clang++
+
+  firmware:
+    # the patch on the pinned upstream TeensyROM (firmware/UPSTREAM), built for the TR+ like upstream's CI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: snoop
+      - name: Pinned upstream
+        id: up
+        run: echo "sha=$(cat snoop/firmware/UPSTREAM)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: SensoriumEmbedded/TeensyROM
+          ref: ${{ steps.up.outputs.sha }}
+          path: tr
+      - name: Patch is current and applies
+        run: |
+          python3 snoop/tools/make_tr_patch.py tr --out /tmp/regen.patch
+          diff -u snoop/firmware/teensyrom-snoop.patch /tmp/regen.patch
+          git -C tr apply ../snoop/firmware/teensyrom-snoop.patch
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: tr/.nvmrc
+      - name: Install arduino-cli and the Teensy core
+        working-directory: tr
+        run: |
+          CLI=$(node tools/install-arduino-cli.mjs)
+          if [ "$CLI" != "arduino-cli" ]; then dirname "$CLI" >> "$GITHUB_PATH"; export PATH="$(dirname "$CLI"):$PATH"; fi
+          arduino-cli config init --additional-urls https://www.pjrc.com/teensy/package_teensy_index.json
+          arduino-cli core update-index
+          arduino-cli core install teensy:avr@1.61.0
+          arduino-cli lib install CRC32@2.0.1
+      - name: Build TR+
+        working-directory: tr
+        run: node tools/build-firmware.mjs --target tr-plus --keep-work 2>&1 | tee ../build.log
+      - name: Size and the ISR's code
+        if: always()
+        run: |
+          {
+            echo '### Build'
+            echo '```'
+            grep -iE "free|RAM1|RAM2|FLASH|padding|wrote|\.hex" build.log | tail -40
+            echo '```'
+            ELF=$(find / -name Teensy.ino.elf -newer snoop/Makefile 2>/dev/null | head -1)
+            OBJDUMP=$(find ~/.arduino15 -name arm-none-eabi-objdump | head -1)
+            if [ -n "$ELF" ] && [ -n "$OBJDUMP" ]; then
+              echo '### isrPHI2 (check the prologue: no extra register saves from the tap)'
+              echo '```'
+              "$OBJDUMP" -d --no-show-raw-insn "$ELF" | awk '/<isrPHI2>:/{p=1} p{print; if (++n>90) exit}'
+              echo '```'
+              echo '### SnoopTap'
+              echo '```'
+              "$OBJDUMP" -d --no-show-raw-insn "$ELF" | awk '/<_Z8SnoopTapt>:/{p=1} p{print; if (/^$/) exit}'
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: tr/build/firmware/*.hex
