@@ -6,6 +6,7 @@
 #include "snoop/snoop.c"
 
 bool SnoopReady = false;
+bool SnoopDtrAtStart = false;   // a USB serial run whose host had DTR up: stop when it drops (port closed)
 
 FLASHMEM void SnoopSetup()
 {
@@ -114,6 +115,9 @@ FLASHMEM void SnoopCommand()
    }
    SendU16(AckToken);     // before HELLO, which the next SnoopService() sends
    SnoopOut = CmdChannel;
+   // Only a host that raised DTR can be seen closing the port (pyserial raises it; some
+   // serial libraries leave it down by default, and then the run goes on until stopped).
+   SnoopDtrAtStart = (SnoopOut == (Stream *)&Serial) && Serial.dtr();
 }
 
 // From loop(), every pass.
@@ -129,6 +133,13 @@ FLASHMEM void SnoopService()
       return;
    }
 #endif
+   if (SnoopOut == (Stream *)&Serial && SnoopDtrAtStart && !Serial.dtr())
+   {  // the host closed the port: nobody is reading
+      snoop_stop(&SnoopState, SNOOP_BYE_CHANNEL, micros(), ARM_DWT_CYCCNT);
+      SnoopFlushTo(NULL, 0);
+      SnoopOut = NULL;
+      return;
+   }
    snoop_poll(&SnoopState, micros(), ARM_DWT_CYCCNT);
    SnoopSend(SnoopOut);
 }

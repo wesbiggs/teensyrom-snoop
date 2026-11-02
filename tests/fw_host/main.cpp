@@ -59,7 +59,13 @@ public:
    bool connected() { return up; }
 };
 
-Stream Serial;
+class UsbSerial : public Stream {
+public:
+   bool line = true;
+   uint8_t dtr() { return line; }
+};
+
+UsbSerial Serial;
 EthernetClient tcpClient;
 Stream *CmdChannel = &Serial;
 
@@ -171,6 +177,20 @@ int main()
    Command(&Ntsc, {0x64, 0x53, 0});
    CHECK(!SnoopState.running && SnoopOut == NULL);
    Dump("build/fw_ntsc.bin", Ntsc);
+   // 6. USB serial: the host closes the port (DTR drops) -> the run stops; DTR never up -> it runs on
+   IO1[wRegVid_TOD_Clks] = 0;
+   Serial.out.clear();
+   Command(&Serial, {0x64, 0x53, 1, 1, 0x18, 0xD4, 0x18, 0xD4, 0, 0});
+   Loop();
+   CHECK(SnoopState.running);
+   Serial.line = false;
+   Loop();
+   CHECK(!SnoopState.running && SnoopOut == NULL);
+   Command(&Serial, {0x64, 0x53, 1, 1, 0x18, 0xD4, 0x18, 0xD4, 0, 0});
+   Loop(3);
+   CHECK(SnoopState.running);
+   Command(&Serial, {0x64, 0x53, 0});
+   CHECK(!SnoopState.running);
 
    if (Fails) { fprintf(stderr, "fw_host: %d failed\n", Fails); return 1; }
    printf("fw_host: ok\n");

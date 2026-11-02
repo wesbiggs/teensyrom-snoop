@@ -101,10 +101,10 @@ index 0000000..0555a91
 +#endif
 diff --git a/Source/Teensy/WriteSnoop.ino b/Source/Teensy/WriteSnoop.ino
 new file mode 100644
-index 0000000..10ffd20
+index 0000000..b972b0e
 --- /dev/null
 +++ b/Source/Teensy/WriteSnoop.ino
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,147 @@
 +// teensyrom-snoop: the main-loop half.  Command 0x6453 from the USB serial or TCP channel, and
 +// SnoopService() from loop().  Protocol: docs/PROTOCOL.md in teensyrom-snoop.
 +
@@ -113,6 +113,7 @@ index 0000000..10ffd20
 +#include "snoop/snoop.c"
 +
 +bool SnoopReady = false;
++bool SnoopDtrAtStart = false;   // a USB serial run whose host had DTR up: stop when it drops (port closed)
 +
 +FLASHMEM void SnoopSetup()
 +{
@@ -221,6 +222,9 @@ index 0000000..10ffd20
 +   }
 +   SendU16(AckToken);     // before HELLO, which the next SnoopService() sends
 +   SnoopOut = CmdChannel;
++   // Only a host that raised DTR can be seen closing the port (pyserial raises it; some
++   // serial libraries leave it down by default, and then the run goes on until stopped).
++   SnoopDtrAtStart = (SnoopOut == (Stream *)&Serial) && Serial.dtr();
 +}
 +
 +// From loop(), every pass.
@@ -236,6 +240,13 @@ index 0000000..10ffd20
 +      return;
 +   }
 +#endif
++   if (SnoopOut == (Stream *)&Serial && SnoopDtrAtStart && !Serial.dtr())
++   {  // the host closed the port: nobody is reading
++      snoop_stop(&SnoopState, SNOOP_BYE_CHANNEL, micros(), ARM_DWT_CYCCNT);
++      SnoopFlushTo(NULL, 0);
++      SnoopOut = NULL;
++      return;
++   }
 +   snoop_poll(&SnoopState, micros(), ARM_DWT_CYCCNT);
 +   SnoopSend(SnoopOut);
 +}
