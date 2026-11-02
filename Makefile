@@ -38,6 +38,10 @@ test-e2e: build/libsnoop.so
 
 test: check-cxx test-core test-fw test-player test-e2e
 
+# the live path in real time against tools/fake_tr.py (timing-dependent: not in make test)
+test-live: demo
+	$(PYTHON) tests/live_tcp.py
+
 # WAVs of a few of the TeensyROM's bundled tunes, through capture -> wire -> reSIDfp (no hardware)
 DEMO_TUNES ?= Aces_High Echoes Switch_625 Popcorn
 demo: build/libsnoop.so
@@ -49,4 +53,4 @@ demo: build/libsnoop.so
 clean:
 	rm -rf build
 
-.PHONY: all check-cxx test-core test-fw test-player test-e2e test demo clean
+.PHONY: all check-cxx test-core test-fw test-player test-e2e test test-live demo clean

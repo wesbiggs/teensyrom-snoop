@@ -16,7 +16,7 @@ pages) can be watched, for example a second SID at `$D500`, the VIC, or a cartri
 | Firmware glue (`WriteSnoop.h/.ino`) | host-tested against stubs; **compiles for the Teensy 4.1** (ARM GCC 13 from GitHub sources, `tools/armcheck`) on its own and together with teensyrom-vdrive |
 | `isrPHI2` cost | same registers saved as stock (checked in the ARM disassembly); a read cycle pays a compare and branch, an unwatched write ~7 instructions |
 | Patch | applies to upstream `136baa83` alone and with the vdrive patch, either order |
-| Player (`trsid.py`) | renders to WAV and plays live (live play untested on a sound card: the container has none) |
+| Player (`trsid.py`) | renders to WAV; the live path (TCP, real time, `tools/fake_tr.py` as the TeensyROM) matches the offline render (62 dB, no underruns, `make test-live`); not tried on a sound card (the container has none) |
 | End to end with real tunes | three of the TeensyROM's bundled SIDs, played in a 6502 emulator, through the core, the wire and reSIDfp: every write at its exact cycle, audio equal to a direct render |
 | **Teensyduino build (GCC 11.3, link, size)** | **not run** (pjrc.com is unreachable from the build container); CI does it |
 | **Hardware** | **not run** |
@@ -88,7 +88,14 @@ While a capture streams on the USB serial port, other TeensyROM commands on that
 their answers are mixed into the stream (the decoder skips them). Send them over TCP, or stop the capture first.
 
 Live play keeps 30 ms behind the C64 (transport margin) plus a 50 ms sound-card FIFO. It corrects
-drift between the C64 crystal and the sound card by dropping or repeating single samples.
+drift between the C64 crystal and the sound card by dropping or repeating single samples. A write
+that arrives after its time was played is applied at once, a few ms late, and counted ("writes late"
+at the end). Raise `--latency` if that count grows: on a busy machine, the fake TeensyROM's own
+sends ran 10+ ms late.
+
+`tools/fake_tr.py RECORDING` serves a recording on TCP like a TeensyROM, at the C64's pace, so the
+clients can be tried without hardware: `make demo`, then `tools/fake_tr.py build/demo/Popcorn.snoop`
+and `host/trsid.py --tcp 127.0.0.1`.
 
 ## Building the firmware
 
@@ -118,6 +125,7 @@ its own `0.9.0.N` stamp applies.
 * `tests/test_e2e.py`: real tunes end to end (needs `pip install py65 pyresidfp numpy` and a TeensyROM checkout, `TEENSYROM=`).
 
 `make demo` writes WAVs of four bundled tunes to `build/demo/` through the whole host path.
+`make test-live` plays one in real time through `fake_tr.py` and `trsid.py --tcp` and compares the result.
 
 `tools/armcheck/build.sh` compiles the main sketch for the Cortex-M7 from GitHub sources and prints
 the registers `isrPHI2` saves (see the script for the repositories it needs).
