@@ -50,6 +50,7 @@ jobs:
           python3 snoop/tools/make_tr_patch.py tr --out /tmp/regen.patch
           diff -u snoop/firmware/teensyrom-snoop.patch /tmp/regen.patch
           git -C tr apply ../snoop/firmware/teensyrom-snoop.patch
+          python3 snoop/tools/stamp_version.py tr
       - uses: actions/setup-node@v7
         with:
           node-version-file: tr/.nvmrc

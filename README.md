@@ -103,11 +103,17 @@ and `host/trsid.py --tcp 127.0.0.1`.
 git clone https://github.com/SensoriumEmbedded/TeensyROM && cd TeensyROM
 git checkout $(cat ../teensyrom-snoop/firmware/UPSTREAM)
 git apply ../teensyrom-snoop/firmware/teensyrom-snoop.patch
+python3 ../teensyrom-snoop/tools/stamp_version.py .   # TRVersion 0.9 -> 0.9-sn1
 node tools/build-firmware.mjs --target tr-plus      # arduino-cli, teensy:avr@1.61.0, CRC32@2.0.1
 ```
 
-To add teensyrom-vdrive as well, apply its patch too, in either order. The firmware version is not stamped. With vdrive,
-its own `0.9.0.N` stamp applies.
+The stamp makes the build obvious: the TR menu's top line reads `TeensyROM+ v0.9-sn1`, and the hex is
+`TeensyROM+_0.9-sn1_full.hex`. The number is `firmware/SNREV`. The stamp is a separate step because
+teensyrom-vdrive's patch rewrites the same `TRVersion` line. To add teensyrom-vdrive as well, apply its patch
+too (either order), then stamp: `0.9.0.45` becomes `0.9.0.45-sn1`.
+
+The TeensyROM's host tools read the version with `v[\d.]+` (`tools/lib/trserial.mjs`), so they show the
+part before `-sn1` (`v0.9`). The menu, the serial banner and the file name show all of it.
 
 `tools/make_tr_patch.py /path/to/TeensyROM` regenerates the patch after a change to `core/` or
 `firmware/`. It works from `git archive HEAD` of that checkout and asserts on the upstream text it edits.

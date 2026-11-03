@@ -16,6 +16,9 @@ Read `README.md` (status table, decisions) and `docs/PROTOCOL.md` first; `docs/U
 * After changing `core/` or `firmware/`, run `tools/make_tr_patch.py <TeensyROM checkout at firmware/UPSTREAM>`
   and commit the patch; CI fails when it is stale. Keep the hunks off the lines teensyrom-vdrive's patch edits
   (both must apply in either order; check with `git apply` on a `git archive` tree).
+* **Version stamp:** `tools/stamp_version.py <tree>` (after the patches) makes TRVersion `<base>-sn<firmware/SNREV>`,
+  shown at the top of the TR menu. **Bump `firmware/SNREV` on any commit that changes firmware behaviour** (`core/`,
+  `firmware/`, the patch edits). Keep the stamp out of the patch: teensyrom-vdrive's patch edits the same line.
 * Protocol changes: bump `SNOOP_PROTO_VERSION` and `PROTO_VERSION` in `host/snoopproto.py`, update docs/PROTOCOL.md
   and both the C encoder and the Python encoder (tests use the Python one to build streams).
 * No Commodore ROM bytes and no SID tunes in the repo: tests read the TeensyROM checkout's bundled tunes (`TEENSYROM=`).
