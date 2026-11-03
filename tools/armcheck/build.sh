@@ -16,7 +16,11 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 OUT=$(pwd)/build/armcheck; mkdir -p "$OUT"
 T="$OUT/tree-$NAME"
 rm -rf "$T" && mkdir -p "$T" && git -C "$TR" archive HEAD | tar -x -C "$T"
-for p in "$@"; do P=$(cd "$(dirname "$p")" && pwd)/$(basename "$p"); (cd "$T" && git apply --whitespace=nowarn "$P") || exit 1; done
+# The tree gets a repository of its own: inside another one (build/ of this repo), git apply works
+# relative to that repository and silently skips every file outside the current directory.
+git -C "$T" init -q && git -C "$T" add -A && git -C "$T" -c user.name=x -c user.email=x@x commit -qm base
+for p in "$@"; do P=$(cd "$(dirname "$p")" && pwd)/$(basename "$p"); git -C "$T" apply --whitespace=nowarn "$P" || exit 1; done
+[ $# -eq 0 ] || ! git -C "$T" diff --quiet || { echo "$NAME: the patches changed nothing"; exit 1; }
 S=$T/Source/Teensy
 python3 "$HERE/merge.py" "$S" "$S/merged.cpp" >/dev/null
 INC="-I$H/cores/teensy4 -I$HERE/stub -I$S -I$S/src/USBHost_t36 -I$S/src/PN532"

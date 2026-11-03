@@ -51,6 +51,8 @@ def main():
     ap.add_argument("--send-ms", type=int, default=0, help="how often the TeensyROM sends, ms (default: 20 on USB "
                     "serial, at once on TCP). Every USB transfer briefly stops the bus interrupt: do not go below 20 on USB")
     ap.add_argument("--buffer", type=float, default=0.05, help="live: sound card FIFO target, seconds")
+    ap.add_argument("--isr", action="store_true", help="live: print the TeensyROM's late bus-interrupt counts every second "
+                    "(firmware 0.9-sn3+): a cartridge game misbehaves when '>250ns' climbs")
     a = ap.parse_args()
 
     try:
@@ -120,11 +122,19 @@ def main():
     if stream:
         stream.start()
     end = time.time() + a.seconds if a.seconds else None
+    last_status = None
     try:
         data = rest
         while not (end and time.time() > end):
             for f in dec.feed(data):
                 player.feed(f)
+                if isinstance(f, sp.Status):
+                    if a.isr and last_status is not None:
+                        secs = max((f.time - last_status.time) / player.r.phi2, 1e-3)
+                        print(f"# late bus interrupts/s: {(f.late - last_status.late) / secs:7.1f}  "
+                              f">250ns: {(f.late250 - last_status.late250) / secs:6.1f}  "
+                              f">1us: {(f.late1000 - last_status.late1000) / secs:6.1f}", flush=True)
+                    last_status = f
                 if isinstance(f, sp.Bye):
                     raise KeyboardInterrupt
             data = ch.read()
@@ -142,6 +152,10 @@ def main():
         ch.close()
     print(f"# writes late {player.r.late}, underruns {player.underruns}, drift: dropped {player.dropped} "
           f"repeated {player.repeated}, lost frames {dec.lost_frames}")
+    if last_status is not None:
+        secs = max(last_status.time / player.r.phi2, 1e-3)
+        print(f"# late bus interrupts in {secs:.0f} s: {last_status.late} (>250ns {last_status.late250}, "
+              f">1us {last_status.late1000})")
     if a.wav and recorded:
         import numpy as np
         write_wav(a.wav, np.concatenate(recorded), a.rate, channels)

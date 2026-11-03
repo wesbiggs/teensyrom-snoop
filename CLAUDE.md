@@ -34,5 +34,8 @@ Read `README.md` (status table, decisions) and `docs/PROTOCOL.md` first; `docs/U
 Builds with Teensyduino 1.61 in CI (the `firmware` job uploads the `.hex`; pjrc.com is not reachable from the cloud
 container, so build there or with `tools/armcheck`). Upstream base `6518b966`, the same as teensyrom-vdrive 0.9.0.45.
 **0.9-sn1 works on hardware** (owner, TCP and USB serial), but USB serial glitched cartridge games: every USB
-transfer in the Teensy core runs with all interrupts off. 0.9-sn2 batches USB sends (20 ms); not yet on hardware.
-Keep USB writes few and large: never stream to USB serial in small pieces.
+transfer in the Teensy core runs with all interrupts off. 0.9-sn2 batches USB sends (20 ms): Ms. Pac-Man still
+misbehaves on USB (owner), cause not settled. 0.9-sn3: Nagle batching on TCP, late phi2 interrupts counted (STATUS v3,
+`trsid.py --isr`) to find out; not yet on hardware. Keep USB writes few and large.
+`tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
+file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.

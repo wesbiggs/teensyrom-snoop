@@ -245,6 +245,29 @@ class Timing(unittest.TestCase):
         self.assertEqual(st[0].time, PAL)
 
 
+class LateIsr(unittest.TestCase):
+    def test_late_counts_and_thresholds(self):
+        s = Sim([(0xD418, 0xD418)])
+        LIB.sim_late_cyc.restype = U32
+        period = CPU // PAL
+        self.assertEqual(LIB.sim_late_cyc(0), period + CPU // 4_000_000)
+        self.assertEqual(LIB.sim_late_cyc(1), period + CPU // 1_000_000)
+        for cyc in [period + 20, period + 100, period + 200, period + 400, period + 700, 2 * period + 10, 50 * period]:
+            LIB.sim_late(cyc)
+        s.stop(PAL)
+        st = s.of(sp.Status)[-1]
+        # thresholds at 600 MHz: +150 cycles (250 ns), +600 (1 us)
+        self.assertEqual((st.late, st.late250, st.late1000), (7, 5, 3))
+
+    def test_reset_by_start(self):
+        s = Sim([(0xD418, 0xD418)])
+        LIB.sim_late(10 * CPU // PAL)
+        s.stop(10)
+        s2 = Sim([(0xD418, 0xD418)])
+        s2.stop(10)
+        self.assertEqual(s2.of(sp.Status)[-1].late, 0)
+
+
 class Limits(unittest.TestCase):
     def test_ring_full_counts_drops(self):
         s = Sim([(0xD418, 0xD418)], gap=0)

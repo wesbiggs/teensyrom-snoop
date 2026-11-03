@@ -50,6 +50,8 @@ class Glue(unittest.TestCase):
         dec, fr, data = frames("fw_ntsc.bin")
         self.assertEqual(fr[0].phi2_hz, sp.PHI2_NTSC)
         self.assertEqual([(a, v) for _, a, v in sp.writes_of(fr)], [(0xD418, 0x0F)])
+        st = [f for f in fr if isinstance(f, sp.Status)][-1]
+        self.assertEqual((st.late, st.late250, st.late1000), (1, 1, 1))
         self.assertIsInstance(fr[-1], sp.Bye)
         self.assertEqual(fr[-1].reason, 0)
 

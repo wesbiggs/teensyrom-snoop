@@ -1,4 +1,4 @@
-# teensyrom-snoop protocol (version 2)
+# teensyrom-snoop protocol (version 3)
 
 All multi-byte numbers are little-endian unless marked otherwise. `varint` is unsigned LEB128
 (7 bits per byte, low group first, high bit = more).
@@ -10,7 +10,7 @@ They work while a C64 program runs (they are in the always-available part of `Pr
 
 | bytes | meaning |
 |---|---|
-| `64 53 01 n {first, last}*n gap send_ms` | **start**: watch `n` (1-16) inclusive ranges, `first`/`last` u16 each. `gap` (u8) see below. `send_ms` (u8): send at most this often, in ms; 0 = the channel's default (20 on USB serial, at once on TCP). Version 1 called this byte `flags` and required 0, which still means the default. |
+| `64 53 01 n {first, last}*n gap send_ms` | **start**: watch `n` (1-16) inclusive ranges, `first`/`last` u16 each. `gap` (u8) see below. `send_ms` (u8): send at most this often, in ms; 0 = the channel's default (20 on USB serial; on TCP, Nagle's rule from version 3: at once while nothing is unacknowledged, else up to 20 ms or 1 KB). Version 1 called this byte `flags` and required 0, which still means the default. |
 | `64 53 00` | **stop** |
 | `64 53 02` | **status**: queue a STATUS frame now |
 
@@ -73,7 +73,9 @@ STATUS/BYE, so latency is a few ms.
 
 ### STATUS `03`
 
-`03 next_seq:u16 time:varint dropped:u32 out_dropped:u32 ring_hiwater:u16 writes:u32`
+`03 next_seq:u16 time:varint dropped:u32 out_dropped:u32 ring_hiwater:u16 writes:u32 late:u32 late250:u32 late1000:u32`
+
+The three `late` counters are new in version 3. A version 2 STATUS ends after `writes`, and the decoder accepts both.
 
 Once a second, on the status command, and before BYE.
 
@@ -83,6 +85,10 @@ Once a second, on the status command, and before BYE.
 * `out_dropped`: frames lost because the output buffer (8 KB) was full, this run.
 * `ring_hiwater`: most writes waiting in the ring at once since the last STATUS.
 * `writes`: writes captured this run.
+* `late`, `late250`, `late1000`: phi2 interrupts this run that came late: any amount (more than
+  `nS_MaxAdj` after the previous one), more than ~250 ns (a cartridge ROM read answered then can be wrong),
+  and more than ~1 us (a bus cycle missed). This is a diagnostic of what else holds the bus interrupt up. It is
+  counted in isrPHI2's existing late branch, so on-time cycles pay nothing.
 
 ### BYE `04`
 

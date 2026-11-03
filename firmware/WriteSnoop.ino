@@ -14,8 +14,15 @@ bool SnoopDtrAtStart = false;   // a USB serial run whose host had DTR up: stop 
 // output goes out at most every SnoopSendEveryMs (20 on USB serial unless the start command asks for
 // another value; 0 = at once, TCP's default), or when SnoopBatchBytes are waiting, in as few writes as
 // the channel takes.
+//
+// On TCP (from 0.9-sn3) the default is Nagle's rule, as upstream's SwiftLink Tx (PR #80): send at once while
+// nothing sent earlier is unacknowledged (availableForWrite() back at the full socket size), otherwise collect
+// until 1 KB or SnoopTcpMaxMs.  A fast LAN keeps near-zero latency; a slow link (multi-hop WiFi) gets fewer,
+// larger segments instead of one small one every ~2 ms.  A send interval in the start command replaces the rule.
 #define SnoopUsbDefaultMs  20
+#define SnoopTcpMaxMs      20
 #define SnoopBatchBytes    1024
+bool SnoopNagle = false;
 uint32_t SnoopSendEveryMs = 0;
 uint32_t SnoopLastSendMs = 0;
 DMAMEM uint8_t SnoopTxBuf[2048];   // one USB serial transmit buffer (TX_SIZE) per write
@@ -132,7 +139,10 @@ FLASHMEM void SnoopCommand()
    // Only a host that raised DTR can be seen closing the port (pyserial raises it; some
    // serial libraries leave it down by default, and then the run goes on until stopped).
    SnoopDtrAtStart = (SnoopOut == (Stream *)&Serial) && Serial.dtr();
-   SnoopSendEveryMs = Flags ? Flags : (SnoopOut == (Stream *)&Serial ? SnoopUsbDefaultMs : 0);
+   SnoopSendEveryMs = Flags ? Flags : (SnoopOut == (Stream *)&Serial ? SnoopUsbDefaultMs : SnoopTcpMaxMs);
+#ifdef FeatTCPListen
+   SnoopNagle = !Flags && SnoopOut == (Stream *)&tcpClient;
+#endif
    SnoopLastSendMs = millis();
 }
 
@@ -158,8 +168,12 @@ FLASHMEM void SnoopService()
    }
    snoop_poll(&SnoopState, micros(), ARM_DWT_CYCCNT);
    const uint32_t Now = millis();
-   if (snoop_out_avail(&SnoopState) &&
-       (snoop_out_avail(&SnoopState) >= SnoopBatchBytes || Now - SnoopLastSendMs >= SnoopSendEveryMs))
+   const uint32_t Avail = snoop_out_avail(&SnoopState);
+   bool Due = Avail && (Avail >= SnoopBatchBytes || Now - SnoopLastSendMs >= SnoopSendEveryMs);
+#ifdef FeatTCPListen
+   if (Avail && !Due && SnoopNagle) Due = tcpClient.availableForWrite() >= FNET_SOCKET_DEFAULT_SIZE;   // nothing in flight
+#endif
+   if (Due)
    {
       SnoopSend(SnoopOut);
       SnoopLastSendMs = Now;

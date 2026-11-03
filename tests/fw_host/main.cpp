@@ -19,6 +19,7 @@
 #define FailToken 0x9B7F
 #define wRegVid_TOD_Clks 7
 #define rvtcNTSC 0x01
+#define FNET_SOCKET_DEFAULT_SIZE 1024 * 2   // as NativeEthernet.h (no parentheses there either)
 
 uint8_t IO1[256];
 uint32_t ARM_DWT_CYCCNT = 1000;
@@ -89,10 +90,13 @@ bool GetUInt(uint32_t *InVal, uint8_t NumBytes)
 #include "../../firmware/WriteSnoop.h"
 #include "../../firmware/WriteSnoop.ino"
 
+static uint32_t LateBy = 0;   // the next Cycle() comes this many CPU cycles late (isrPHI2's late branch)
+
 // what isrPHI2 does with the patch, for one bus cycle
 static void Cycle(uint16_t Address, bool R_Wn, uint8_t Data)
 {
    ARM_DWT_CYCCNT += 609;               // ~one PAL cycle at 600 MHz
+   if (LateBy) { ARM_DWT_CYCCNT += LateBy; snoop_isr_late(&SnoopHot, 609 + LateBy); LateBy = 0; }
    StartCycCnt = ARM_DWT_CYCCNT;
    BusData = Data;
    if (!R_Wn && SnoopHot.page[Address >> 8]) SnoopTap(Address);
@@ -183,6 +187,7 @@ int main()
    Stream Ntsc;
    Command(&Ntsc, {0x64, 0x53, 1, 1, 0x18, 0xD4, 0x18, 0xD4, 0, 0});
    Loop();
+   LateBy = 600;                           // one interrupt ~1 us late: counted in all three
    Cycle(0xD418, false, 0x0F);
    Loop();
    Command(&Ntsc, {0x64, 0x53, 0});
@@ -206,10 +211,11 @@ int main()
    //    TCP at once, and the start command's last byte sets the interval
    {
       tcpClient.up = true;
-      for (int pass = 0; pass < 3; pass++)
+      for (int pass = 0; pass < 4; pass++)
       {
          Stream *ch = pass == 0 ? (Stream *)&Serial : (Stream *)&tcpClient;
          const uint8_t ms = pass == 2 ? 50 : 0;
+         tcpClient.room = pass == 3 ? 1500 : 1 << 30;   // pass 3: earlier data unacknowledged, Nagle waits
          Command(ch, {0x64, 0x53, 1, 1, 0x18, 0xD4, 0x18, 0xD4, 0, ms});
          ch->bursts.clear();
          const uint32_t t0 = NowUs;
@@ -219,8 +225,10 @@ int main()
          if (pass == 0) CHECK(n >= secs_ms / 20 - 1 && n <= secs_ms / 20 + 1);
          if (pass == 1) CHECK(n >= 80);                                   // a frame every 2 ms or so, sent at once
          if (pass == 2) CHECK(n >= secs_ms / 50 - 1 && n <= secs_ms / 50 + 1);
-         for (size_t i = 1; i < n && pass != 1; i++) CHECK(ch->bursts[i] - ch->bursts[i - 1] >= (pass == 0 ? 19000u : 49000u));
-         printf("fw_host: %s: %zu sends in %u ms\n", pass == 0 ? "USB serial" : pass == 1 ? "TCP" : "TCP at 50 ms", n, secs_ms);
+         if (pass == 3) CHECK(n >= secs_ms / 20 - 1 && n <= secs_ms / 20 + 1);
+         for (size_t i = 1; i < n && pass != 1; i++) CHECK(ch->bursts[i] - ch->bursts[i - 1] >= (pass == 2 ? 49000u : 19000u));
+         printf("fw_host: %s: %zu sends in %u ms\n", pass == 0 ? "USB serial" : pass == 1 ? "TCP, all acknowledged" :
+                pass == 2 ? "TCP at 50 ms" : "TCP, data in flight", n, secs_ms);
          Command(ch, {0x64, 0x53, 0});
       }
    }

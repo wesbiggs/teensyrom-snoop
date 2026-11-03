@@ -22,7 +22,7 @@
 extern "C" {
 #endif
 
-#define SNOOP_PROTO_VERSION 2
+#define SNOOP_PROTO_VERSION 3
 
 #ifndef SNOOP_MAX_RANGES
 #define SNOOP_MAX_RANGES   16     /* address ranges per start command */
@@ -77,6 +77,8 @@ typedef struct {
    volatile uint32_t head;                           /* written by the ISR only */
    volatile uint32_t tail;                           /* written by the main loop only */
    volatile uint32_t dropped;                        /* ISR: ring full */
+   volatile uint32_t late[3];                        /* late phi2 interrupts: any, > ~250 ns, > ~1 us (an edge missed) */
+   uint32_t          late_cyc[2];                    /* CPU cycles between two interrupts above which late[1] / late[2] count */
    snoop_ev_t        ring[SNOOP_RING];
 } snoop_hot_t;
 
@@ -97,6 +99,19 @@ static inline int snoop_isr_match(const snoop_hot_t *hot, uint16_t addr)
    const uint8_t p = hot->page[addr >> 8];
    if (!p) return 0;
    return (hot->bits[p - 1][(addr & 0xff) >> 5] >> (addr & 31)) & 1u;
+}
+
+/* isrPHI2's "late" branch (an interrupt more than nS_MaxAdj after the previous one) calls this with
+ * the CPU cycles since the previous interrupt: a diagnostic of what else holds the bus interrupt up
+ * (interrupts switched off by a USB transfer, a long ISR, ...).  Counts from the start command. */
+static inline void snoop_isr_late(snoop_hot_t *hot, uint32_t cyc_since_last)
+{
+   hot->late[0]++;
+   if (cyc_since_last > hot->late_cyc[0])
+   {
+      hot->late[1]++;
+      if (cyc_since_last > hot->late_cyc[1]) hot->late[2]++;
+   }
 }
 
 static inline void snoop_isr_store(snoop_hot_t *hot, uint16_t addr, uint8_t data, uint32_t stamp)

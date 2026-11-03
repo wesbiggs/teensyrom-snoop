@@ -179,7 +179,7 @@ SNOOP_COLD void snoop_init(snoop_t *s, snoop_hot_t *hot)
 
 SNOOP_COLD void snoop_status(snoop_t *s)
 {
-   uint8_t p[1 + 2 + 10 + 4 + 4 + 2 + 4];
+   uint8_t p[1 + 2 + 10 + 4 + 4 + 2 + 4 + 3 * 4];
    size_t n = 0;
    frame_close(s);
    p[n++] = SNOOP_F_STATUS;
@@ -189,6 +189,7 @@ SNOOP_COLD void snoop_status(snoop_t *s)
    n += put_u32(p + n, s->out_dropped);
    n += put_u16(p + n, (uint16_t)(s->ring_hiwater > 0xFFFF ? 0xFFFF : s->ring_hiwater));
    n += put_u32(p + n, s->writes);
+   for (int i = 0; i < 3; i++) n += put_u32(p + n, s->hot->late[i]);
    emit(s, p, n);
    s->ring_hiwater = 0;
 }
@@ -232,6 +233,12 @@ SNOOP_COLD int snoop_start(snoop_t *s, const snoop_range_t *ranges, uint8_t nran
    memset(hot->bits, 0, sizeof hot->bits);
    hot->head = hot->tail = 0;
    hot->dropped = 0;
+   hot->late[0] = hot->late[1] = hot->late[2] = 0;
+   {  /* one phi2 period, plus ~250 ns / ~1 us */
+      const uint64_t period = (uint64_t)cpu_hz / phi2_hz;
+      hot->late_cyc[0] = (uint32_t)(period + (uint64_t)cpu_hz / 4000000u);
+      hot->late_cyc[1] = (uint32_t)(period + (uint64_t)cpu_hz / 1000000u);
+   }
 
    memcpy(s->ranges, ranges, nranges * sizeof *ranges);
    s->nranges = nranges;

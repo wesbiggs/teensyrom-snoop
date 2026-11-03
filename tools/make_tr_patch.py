@@ -4,12 +4,13 @@
   tools/make_tr_patch.py /path/to/TeensyROM [--out firmware/teensyrom-snoop.patch]
 
 Works on `git archive HEAD` of that checkout (its own uncommitted edits are ignored), copies
-core/ to Source/Teensy/snoop/ and firmware/WriteSnoop.{h,ino} to Source/Teensy/, and makes four
+core/ to Source/Teensy/snoop/ and firmware/WriteSnoop.{h,ino} to Source/Teensy/, and makes five
 small edits that each assert on upstream's text:
 
   TeensyROM.h      #define FeatWriteSnoop (main image only; MinimalBoot never sees it)
   Teensy.ino       #include "WriteSnoop.h" before ISRs.c, SnoopService() at the top of loop()
-  ISRs.c           the tap, after the Kernal Replace snoop and before the PLA decode wait
+  ISRs.c           the tap, after the Kernal Replace snoop and before the PLA decode wait; and the
+                   late-interrupt count at the end of the "late" branch (teensyrom-vdrive edits its top)
   SerUSBIO.ino     token 0x6453 in ProcessCommand's always-available switch
 
 The hunks are kept away from the lines teensyrom-vdrive's patch changes, so both apply in either order.
@@ -91,6 +92,19 @@ def main():
              "   //  only when the address is watched.  After the snoops above, so their timing is unchanged.\n"
              "   if (!R_Wn && SnoopHot.page[Address >> 8]) SnoopTap(Address);\n"
              "#endif\n")
+
+        edit(tree, f"{T}/MinimalBoot/Common/ISRs.c",
+             "            if (BigBufCount < BigBufSize-1) BigBufCount++; //last entry is scratch, rewritten once full\n"
+             "         }\n"
+             "      #endif\n"
+             "   }\n",
+             "            if (BigBufCount < BigBufSize-1) BigBufCount++; //last entry is scratch, rewritten once full\n"
+             "         }\n"
+             "      #endif\n"
+             "      #ifdef FeatWriteSnoop\n"
+             "         snoop_isr_late(&SnoopHot, CycSinceLast); //teensyrom-snoop: count late interrupts (only on this late path)\n"
+             "      #endif\n"
+             "   }\n")
 
         edit(tree, f"{T}/SerUSBIO.ino",
              "   #endif\n"

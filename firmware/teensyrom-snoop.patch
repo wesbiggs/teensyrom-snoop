@@ -1,10 +1,20 @@
 teensyrom-snoop patch for TeensyROM, made on upstream 6518b966 by tools/make_tr_patch.py
 
 diff --git a/Source/Teensy/MinimalBoot/Common/ISRs.c b/Source/Teensy/MinimalBoot/Common/ISRs.c
-index 0425e49..f9a44eb 100644
+index 0425e49..d0d1097 100644
 --- a/Source/Teensy/MinimalBoot/Common/ISRs.c
 +++ b/Source/Teensy/MinimalBoot/Common/ISRs.c
-@@ -103,6 +103,12 @@ FASTRUN void isrPHI2()
+@@ -72,6 +72,9 @@ FASTRUN void isrPHI2()
+             if (BigBufCount < BigBufSize-1) BigBufCount++; //last entry is scratch, rewritten once full
+          }
+       #endif
++      #ifdef FeatWriteSnoop
++         snoop_isr_late(&SnoopHot, CycSinceLast); //teensyrom-snoop: count late interrupts (only on this late path)
++      #endif
+    }
+    
+ #ifdef DbgSignalIsrPHI2
+@@ -103,6 +106,12 @@ FASTRUN void isrPHI2()
  #ifdef Fab04_GlobalKernalReplace
     if (fKernRepl != NULL) if (fKernRepl(Address, R_Wn)) return;
  #endif
@@ -101,10 +111,10 @@ index 0000000..0555a91
 +#endif
 diff --git a/Source/Teensy/WriteSnoop.ino b/Source/Teensy/WriteSnoop.ino
 new file mode 100644
-index 0000000..58fadc3
+index 0000000..a9963e0
 --- /dev/null
 +++ b/Source/Teensy/WriteSnoop.ino
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,183 @@
 +// teensyrom-snoop: the main-loop half.  Command 0x6453 from the USB serial or TCP channel, and
 +// SnoopService() from loop().  Protocol: docs/PROTOCOL.md in teensyrom-snoop.
 +
@@ -121,8 +131,15 @@ index 0000000..58fadc3
 +// output goes out at most every SnoopSendEveryMs (20 on USB serial unless the start command asks for
 +// another value; 0 = at once, TCP's default), or when SnoopBatchBytes are waiting, in as few writes as
 +// the channel takes.
++//
++// On TCP (from 0.9-sn3) the default is Nagle's rule, as upstream's SwiftLink Tx (PR #80): send at once while
++// nothing sent earlier is unacknowledged (availableForWrite() back at the full socket size), otherwise collect
++// until 1 KB or SnoopTcpMaxMs.  A fast LAN keeps near-zero latency; a slow link (multi-hop WiFi) gets fewer,
++// larger segments instead of one small one every ~2 ms.  A send interval in the start command replaces the rule.
 +#define SnoopUsbDefaultMs  20
++#define SnoopTcpMaxMs      20
 +#define SnoopBatchBytes    1024
++bool SnoopNagle = false;
 +uint32_t SnoopSendEveryMs = 0;
 +uint32_t SnoopLastSendMs = 0;
 +DMAMEM uint8_t SnoopTxBuf[2048];   // one USB serial transmit buffer (TX_SIZE) per write
@@ -239,7 +256,10 @@ index 0000000..58fadc3
 +   // Only a host that raised DTR can be seen closing the port (pyserial raises it; some
 +   // serial libraries leave it down by default, and then the run goes on until stopped).
 +   SnoopDtrAtStart = (SnoopOut == (Stream *)&Serial) && Serial.dtr();
-+   SnoopSendEveryMs = Flags ? Flags : (SnoopOut == (Stream *)&Serial ? SnoopUsbDefaultMs : 0);
++   SnoopSendEveryMs = Flags ? Flags : (SnoopOut == (Stream *)&Serial ? SnoopUsbDefaultMs : SnoopTcpMaxMs);
++#ifdef FeatTCPListen
++   SnoopNagle = !Flags && SnoopOut == (Stream *)&tcpClient;
++#endif
 +   SnoopLastSendMs = millis();
 +}
 +
@@ -265,8 +285,12 @@ index 0000000..58fadc3
 +   }
 +   snoop_poll(&SnoopState, micros(), ARM_DWT_CYCCNT);
 +   const uint32_t Now = millis();
-+   if (snoop_out_avail(&SnoopState) &&
-+       (snoop_out_avail(&SnoopState) >= SnoopBatchBytes || Now - SnoopLastSendMs >= SnoopSendEveryMs))
++   const uint32_t Avail = snoop_out_avail(&SnoopState);
++   bool Due = Avail && (Avail >= SnoopBatchBytes || Now - SnoopLastSendMs >= SnoopSendEveryMs);
++#ifdef FeatTCPListen
++   if (Avail && !Due && SnoopNagle) Due = tcpClient.availableForWrite() >= FNET_SOCKET_DEFAULT_SIZE;   // nothing in flight
++#endif
++   if (Due)
 +   {
 +      SnoopSend(SnoopOut);
 +      SnoopLastSendMs = Now;
@@ -276,10 +300,10 @@ index 0000000..58fadc3
 +#endif
 diff --git a/Source/Teensy/snoop/snoop.c b/Source/Teensy/snoop/snoop.c
 new file mode 100644
-index 0000000..6614552
+index 0000000..fd5f2cc
 --- /dev/null
 +++ b/Source/Teensy/snoop/snoop.c
-@@ -0,0 +1,316 @@
+@@ -0,0 +1,323 @@
 +/* teensyrom-snoop: main-loop side.  See snoop.h and docs/PROTOCOL.md. */
 +#include "snoop.h"
 +#include <string.h>
@@ -461,7 +485,7 @@ index 0000000..6614552
 +
 +SNOOP_COLD void snoop_status(snoop_t *s)
 +{
-+   uint8_t p[1 + 2 + 10 + 4 + 4 + 2 + 4];
++   uint8_t p[1 + 2 + 10 + 4 + 4 + 2 + 4 + 3 * 4];
 +   size_t n = 0;
 +   frame_close(s);
 +   p[n++] = SNOOP_F_STATUS;
@@ -471,6 +495,7 @@ index 0000000..6614552
 +   n += put_u32(p + n, s->out_dropped);
 +   n += put_u16(p + n, (uint16_t)(s->ring_hiwater > 0xFFFF ? 0xFFFF : s->ring_hiwater));
 +   n += put_u32(p + n, s->writes);
++   for (int i = 0; i < 3; i++) n += put_u32(p + n, s->hot->late[i]);
 +   emit(s, p, n);
 +   s->ring_hiwater = 0;
 +}
@@ -514,6 +539,12 @@ index 0000000..6614552
 +   memset(hot->bits, 0, sizeof hot->bits);
 +   hot->head = hot->tail = 0;
 +   hot->dropped = 0;
++   hot->late[0] = hot->late[1] = hot->late[2] = 0;
++   {  /* one phi2 period, plus ~250 ns / ~1 us */
++      const uint64_t period = (uint64_t)cpu_hz / phi2_hz;
++      hot->late_cyc[0] = (uint32_t)(period + (uint64_t)cpu_hz / 4000000u);
++      hot->late_cyc[1] = (uint32_t)(period + (uint64_t)cpu_hz / 1000000u);
++   }
 +
 +   memcpy(s->ranges, ranges, nranges * sizeof *ranges);
 +   s->nranges = nranges;
@@ -598,10 +629,10 @@ index 0000000..6614552
 +}
 diff --git a/Source/Teensy/snoop/snoop.h b/Source/Teensy/snoop/snoop.h
 new file mode 100644
-index 0000000..1ff22b1
+index 0000000..a8cfd4a
 --- /dev/null
 +++ b/Source/Teensy/snoop/snoop.h
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,212 @@
 +/* teensyrom-snoop: capture C64 bus writes to chosen addresses and stream them.
 + *
 + * Portable C99, also compiled as C++ by the TeensyROM firmware (keep it C++-clean).
@@ -626,7 +657,7 @@ index 0000000..1ff22b1
 +extern "C" {
 +#endif
 +
-+#define SNOOP_PROTO_VERSION 2
++#define SNOOP_PROTO_VERSION 3
 +
 +#ifndef SNOOP_MAX_RANGES
 +#define SNOOP_MAX_RANGES   16     /* address ranges per start command */
@@ -681,6 +712,8 @@ index 0000000..1ff22b1
 +   volatile uint32_t head;                           /* written by the ISR only */
 +   volatile uint32_t tail;                           /* written by the main loop only */
 +   volatile uint32_t dropped;                        /* ISR: ring full */
++   volatile uint32_t late[3];                        /* late phi2 interrupts: any, > ~250 ns, > ~1 us (an edge missed) */
++   uint32_t          late_cyc[2];                    /* CPU cycles between two interrupts above which late[1] / late[2] count */
 +   snoop_ev_t        ring[SNOOP_RING];
 +} snoop_hot_t;
 +
@@ -701,6 +734,19 @@ index 0000000..1ff22b1
 +   const uint8_t p = hot->page[addr >> 8];
 +   if (!p) return 0;
 +   return (hot->bits[p - 1][(addr & 0xff) >> 5] >> (addr & 31)) & 1u;
++}
++
++/* isrPHI2's "late" branch (an interrupt more than nS_MaxAdj after the previous one) calls this with
++ * the CPU cycles since the previous interrupt: a diagnostic of what else holds the bus interrupt up
++ * (interrupts switched off by a USB transfer, a long ISR, ...).  Counts from the start command. */
++static inline void snoop_isr_late(snoop_hot_t *hot, uint32_t cyc_since_last)
++{
++   hot->late[0]++;
++   if (cyc_since_last > hot->late_cyc[0])
++   {
++      hot->late[1]++;
++      if (cyc_since_last > hot->late_cyc[1]) hot->late[2]++;
++   }
 +}
 +
 +static inline void snoop_isr_store(snoop_hot_t *hot, uint16_t addr, uint8_t data, uint32_t stamp)

@@ -7,7 +7,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
-PROTO_VERSION = 2
+PROTO_VERSION = 3
 
 F_HELLO, F_WRITES, F_STATUS, F_BYE = 0x01, 0x02, 0x03, 0x04
 BYE_REASONS = {0: "stopped", 1: "replaced", 2: "channel"}
@@ -118,6 +118,9 @@ class Status:
     out_dropped: int    # frames lost because the output buffer was full (total this run)
     ring_hiwater: int   # most ring entries waiting at once since the last STATUS
     writes: int         # writes captured this run
+    late: int = 0       # phi2 interrupts that came late (any amount), this run (version 3)
+    late250: int = 0    # ...more than ~250 ns late: a cartridge ROM read answered then can be wrong
+    late1000: int = 0   # ...more than ~1 us: a whole bus cycle missed
 
 
 @dataclass
@@ -160,9 +163,13 @@ def parse_payload(p: bytes):
         next_seq = struct.unpack_from("<H", p, 1)[0]
         time, i = _varint(p, 3)
         dropped, out_dropped, hiw, writes = struct.unpack_from("<IIHI", p, i)
-        if i + 14 != len(p):
+        i += 14
+        late = (0, 0, 0)
+        if len(p) == i + 12:                       # version 3
+            late = struct.unpack_from("<III", p, i)
+        elif len(p) != i:
             raise ValueError("STATUS length")
-        return Status(next_seq, time, dropped, out_dropped, hiw, writes)
+        return Status(next_seq, time, dropped, out_dropped, hiw, writes, *late)
     if t == F_BYE:
         if len(p) != 2:
             raise ValueError("BYE length")
@@ -294,9 +301,9 @@ def writes_payload(seq: int, blocks) -> bytes:
     return bytes(p)
 
 
-def status_payload(next_seq, time, dropped=0, out_dropped=0, hiwater=0, writes=0) -> bytes:
+def status_payload(next_seq, time, dropped=0, out_dropped=0, hiwater=0, writes=0, late=(0, 0, 0)) -> bytes:
     return (struct.pack("<BH", F_STATUS, next_seq & 0xFFFF) + put_varint(time)
-            + struct.pack("<IIHI", dropped, out_dropped, hiwater, writes))
+            + struct.pack("<IIHI", dropped, out_dropped, hiwater, writes) + struct.pack("<III", *late))
 
 
 def bye_payload(reason=0) -> bytes:
