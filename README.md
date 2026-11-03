@@ -18,7 +18,7 @@ pages) can be watched, for example a second SID at `$D500`, the VIC, or a cartri
 | Patch | applies to upstream `136baa83` alone and with the vdrive patch, either order |
 | Player (`trsid.py`) | renders to WAV; the live path (TCP, real time, `tools/fake_tr.py` as the TeensyROM) matches the offline render (62 dB, no underruns, `make test-live`); not tried on a sound card (the container has none) |
 | End to end with real tunes | three of the TeensyROM's bundled SIDs, played in a 6502 emulator, through the core, the wire and reSIDfp: every write at its exact cycle, audio equal to a direct render |
-| **Teensyduino build (GCC 11.3, link, size)** | **not run** (pjrc.com is unreachable from the build container); CI does it |
+| Teensyduino build (GCC 11.3, link, size) | **builds** in CI (`TeensyROM+_0.9_full.hex`; main image RAM1 free for locals 75004, padding 26888). `isrPHI2` saves `{r3-r9, sl, fp, lr}` (already every callee-saved register, so the hook cannot add saves); write cycles branch out to the page-map test; `SnoopTap` stores the entry before `head` |
 | **Hardware** | **not run** |
 
 ## How it works
@@ -157,6 +157,5 @@ the registers `isrPHI2` saves (see the script for the repositories it needs).
 
 ## Next
 
-* Watch the CI firmware build (size report, `isrPHI2` disassembly from Teensyduino's GCC 11.3).
 * On hardware: `trsnoop.py --range D400-D41C` while the TeensyROM's SID player runs a tune, then `trsid.py`.
 * Phase 2, the SID emulated on the Teensy with USB audio out: `docs/USB-AUDIO.md`.

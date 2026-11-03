@@ -28,5 +28,5 @@ Read `README.md` (status table, decisions) and `docs/PROTOCOL.md` first; `docs/U
 * `tools/armcheck/build.sh <3p> <TeensyROM> <name> [patches]` — ARM compile + isrPHI2 saved registers.
 
 ## Status
-Host-tested and ARM-compiled (GCC 13, GitHub sources). No Teensyduino build here (pjrc.com is not reachable
-from the cloud container; CI builds it), no hardware run yet.
+Host-tested; builds with Teensyduino 1.61 in CI (the `firmware` job uploads the `.hex`; pjrc.com is not reachable
+from the cloud container, so build there or with `tools/armcheck`). No hardware run yet.
