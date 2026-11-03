@@ -103,6 +103,13 @@ was fine. From 0.9-sn2 the TeensyROM sends at most every 20 ms on USB serial (or
 late phi2 interrupts (any, >250 ns, >1 us), reported in every STATUS and shown live by `trsid.py --isr`. Compare
 USB and TCP while the game runs; if USB's `>250ns` count climbs, the USB path is holding the bus interrupt up.
 
+**Found (owner, 2026-11-03): it is any USB write, not snoop.** Stock firmware answering pings over USB 20 times a
+second gives late `>250ns` interrupts at once and crashes Ms. Pac-Man. A port that is only held open (`cat`) does
+neither, and nor does TCP. Every USB transmit goes through `schedule_transfer()` in the Teensy core's `usb.c`, which
+runs with all interrupts off while it polls USB registers. `tools/teensy_core_usb_basepri.py <cores/teensy4>`
+(experimental; `--revert` undoes it) masks only priority 32 and lower there (`BASEPRI`), so the phi2 interrupt
+(priority 16) keeps running. Patch the installed Teensyduino core, rebuild, rerun the ping test.
+
 On TCP (0.9-sn3) the default is Nagle's rule, as in upstream's SwiftLink Tx (PR #80): send at once while
 everything sent earlier has been acknowledged, otherwise collect until 1 KB or 20 ms. A fast LAN keeps
 near-zero latency, and a slow link gets fewer, larger segments instead of one small one every ~2 ms.

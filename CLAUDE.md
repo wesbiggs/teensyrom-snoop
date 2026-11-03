@@ -38,6 +38,9 @@ transfer in the Teensy core runs with all interrupts off. 0.9-sn2 batches USB se
 misbehaves on USB (owner), cause not settled. 0.9-sn3: Nagle batching on TCP, late phi2 interrupts counted (STATUS v3,
 `trsid.py --isr`) to find out. sn3 on hardware: TCP much improved (Nagle stays); Ms. Pac-Man on USB still crashes, with
 no missed cycles and only 12 >250 ns late interrupts in 16 s (8 in the crash second): the USB data path is not clearly
-the cause; see the README status row for the runs that tell it apart. Keep USB writes few and large.
+the cause. **Settled (owner): any USB write from the TeensyROM does it, stock firmware too** (pings over USB crash
+Ms. Pac-Man; a merely open port does not): `schedule_transfer()` in the Teensy core's `usb.c` runs with all interrupts
+off. Experiment: `tools/teensy_core_usb_basepri.py` (BASEPRI 32 there, the phi2 interrupt at 16 keeps running); not yet
+on hardware. Keep USB writes few and large.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
 file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.
