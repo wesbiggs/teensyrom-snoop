@@ -31,5 +31,8 @@ Read `README.md` (status table, decisions) and `docs/PROTOCOL.md` first; `docs/U
 * `tools/armcheck/build.sh <3p> <TeensyROM> <name> [patches]` — ARM compile + isrPHI2 saved registers.
 
 ## Status
-Host-tested; builds with Teensyduino 1.61 in CI (the `firmware` job uploads the `.hex`; pjrc.com is not reachable
-from the cloud container, so build there or with `tools/armcheck`). No hardware run yet.
+Builds with Teensyduino 1.61 in CI (the `firmware` job uploads the `.hex`; pjrc.com is not reachable from the cloud
+container, so build there or with `tools/armcheck`). Upstream base `6518b966`, the same as teensyrom-vdrive 0.9.0.45.
+**0.9-sn1 works on hardware** (owner, TCP and USB serial), but USB serial glitched cartridge games: every USB
+transfer in the Teensy core runs with all interrupts off. 0.9-sn2 batches USB sends (20 ms); not yet on hardware.
+Keep USB writes few and large: never stream to USB serial in small pieces.

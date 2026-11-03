@@ -1,4 +1,4 @@
-teensyrom-snoop patch for TeensyROM, made on upstream 136baa83 by tools/make_tr_patch.py
+teensyrom-snoop patch for TeensyROM, made on upstream 6518b966 by tools/make_tr_patch.py
 
 diff --git a/Source/Teensy/MinimalBoot/Common/ISRs.c b/Source/Teensy/MinimalBoot/Common/ISRs.c
 index 0425e49..f9a44eb 100644
@@ -101,10 +101,10 @@ index 0000000..0555a91
 +#endif
 diff --git a/Source/Teensy/WriteSnoop.ino b/Source/Teensy/WriteSnoop.ino
 new file mode 100644
-index 0000000..bf5b0c8
+index 0000000..58fadc3
 --- /dev/null
 +++ b/Source/Teensy/WriteSnoop.ino
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,169 @@
 +// teensyrom-snoop: the main-loop half.  Command 0x6453 from the USB serial or TCP channel, and
 +// SnoopService() from loop().  Protocol: docs/PROTOCOL.md in teensyrom-snoop.
 +
@@ -114,6 +114,18 @@ index 0000000..bf5b0c8
 +
 +bool SnoopReady = false;
 +bool SnoopDtrAtStart = false;   // a USB serial run whose host had DTR up: stop when it drops (port closed)
++
++// Sending in batches.  Every USB transfer the Teensy core starts (schedule_transfer in usb.c) runs with
++// all interrupts off, the phi2 ISR included, and a small write starts one of its own.  Streaming in small
++// pieces (~500 transfers/s) made cartridge games glitch or crash (Ms. Pac-Man) while TCP was fine.  So the
++// output goes out at most every SnoopSendEveryMs (20 on USB serial unless the start command asks for
++// another value; 0 = at once, TCP's default), or when SnoopBatchBytes are waiting, in as few writes as
++// the channel takes.
++#define SnoopUsbDefaultMs  20
++#define SnoopBatchBytes    1024
++uint32_t SnoopSendEveryMs = 0;
++uint32_t SnoopLastSendMs = 0;
++DMAMEM uint8_t SnoopTxBuf[2048];   // one USB serial transmit buffer (TX_SIZE) per write
 +
 +FLASHMEM void SnoopSetup()
 +{
@@ -131,13 +143,12 @@ index 0000000..bf5b0c8
 +// (EthernetClient::write busy-waits for buffer space; USB serial waits for the host).
 +FLASHMEM void SnoopSend(Stream *Out)
 +{
-+   uint8_t Buf[512];
 +   while (snoop_out_avail(&SnoopState))
 +   {
 +      int Room = Out->availableForWrite();
 +      if (Room <= 0) return;
-+      uint32_t n = snoop_out_take(&SnoopState, Buf, Room < (int)sizeof Buf ? (uint32_t)Room : sizeof Buf);
-+      Out->write(Buf, n);
++      uint32_t n = snoop_out_take(&SnoopState, SnoopTxBuf, Room < (int)sizeof SnoopTxBuf ? (uint32_t)Room : sizeof SnoopTxBuf);
++      Out->write(SnoopTxBuf, n);
 +   }
 +}
 +
@@ -203,8 +214,7 @@ index 0000000..bf5b0c8
 +      Ranges[i].first = (uint16_t)(b[0] | b[1] << 8);
 +      Ranges[i].last  = (uint16_t)(b[2] | b[3] << 8);
 +   }
-+   if (!SnoopGetByte(&Gap) || !SnoopGetByte(&Flags)) return;
-+   (void)Flags;
++   if (!SnoopGetByte(&Gap) || !SnoopGetByte(&Flags)) return;   // Flags: send interval in ms, 0 = the channel's default
 +
 +   int Res = snoop_check(Ranges, N);   // before anything stops: a refused start leaves a running capture alone
 +   if (Res == 0)
@@ -229,6 +239,8 @@ index 0000000..bf5b0c8
 +   // Only a host that raised DTR can be seen closing the port (pyserial raises it; some
 +   // serial libraries leave it down by default, and then the run goes on until stopped).
 +   SnoopDtrAtStart = (SnoopOut == (Stream *)&Serial) && Serial.dtr();
++   SnoopSendEveryMs = Flags ? Flags : (SnoopOut == (Stream *)&Serial ? SnoopUsbDefaultMs : 0);
++   SnoopLastSendMs = millis();
 +}
 +
 +// From loop(), every pass.
@@ -252,7 +264,13 @@ index 0000000..bf5b0c8
 +      return;
 +   }
 +   snoop_poll(&SnoopState, micros(), ARM_DWT_CYCCNT);
-+   SnoopSend(SnoopOut);
++   const uint32_t Now = millis();
++   if (snoop_out_avail(&SnoopState) &&
++       (snoop_out_avail(&SnoopState) >= SnoopBatchBytes || Now - SnoopLastSendMs >= SnoopSendEveryMs))
++   {
++      SnoopSend(SnoopOut);
++      SnoopLastSendMs = Now;
++   }
 +}
 +
 +#endif
@@ -580,7 +598,7 @@ index 0000000..6614552
 +}
 diff --git a/Source/Teensy/snoop/snoop.h b/Source/Teensy/snoop/snoop.h
 new file mode 100644
-index 0000000..174959f
+index 0000000..1ff22b1
 --- /dev/null
 +++ b/Source/Teensy/snoop/snoop.h
 @@ -0,0 +1,197 @@
@@ -608,7 +626,7 @@ index 0000000..174959f
 +extern "C" {
 +#endif
 +
-+#define SNOOP_PROTO_VERSION 1
++#define SNOOP_PROTO_VERSION 2
 +
 +#ifndef SNOOP_MAX_RANGES
 +#define SNOOP_MAX_RANGES   16     /* address ranges per start command */

@@ -1,4 +1,4 @@
-# teensyrom-snoop protocol (version 1)
+# teensyrom-snoop protocol (version 2)
 
 All multi-byte numbers are little-endian unless marked otherwise. `varint` is unsigned LEB128
 (7 bits per byte, low group first, high bit = more).
@@ -10,7 +10,7 @@ They work while a C64 program runs (they are in the always-available part of `Pr
 
 | bytes | meaning |
 |---|---|
-| `64 53 01 n {first, last}*n gap flags` | **start**: watch `n` (1-16) inclusive ranges, `first`/`last` u16 each. `gap` (u8) see below; `flags` u8, reserved, send 0. |
+| `64 53 01 n {first, last}*n gap send_ms` | **start**: watch `n` (1-16) inclusive ranges, `first`/`last` u16 each. `gap` (u8) see below. `send_ms` (u8): send at most this often, in ms; 0 = the channel's default (20 on USB serial, at once on TCP). Version 1 called this byte `flags` and required 0, which still means the default. |
 | `64 53 00` | **stop** |
 | `64 53 02` | **status**: queue a STATUS frame now |
 
@@ -61,6 +61,12 @@ Starts a run. Time 0 is the start command; `phi2_hz` is the C64 clock the times 
 * Block time = previous block's time + `dt`; the first block's `dt` is from `t0` (0 in practice).
 * Times are C64 cycles since the start, exact to the cycle (the Teensy stamps each write at phi2's
   rising edge; the conversion carries its remainder, so it never drifts against the nominal clock).
+
+**Batching (version 2).** Every USB transfer the Teensy core starts runs with all interrupts off, the bus
+interrupt included, and each small write starts one. Streaming in small pieces made cartridge games glitch or
+crash on USB serial. So the TeensyROM hands the channel what it holds at most every `send_ms` (default 20 on
+USB serial), or once 1 KB is waiting. That is about 50 transfers a second instead of ~500, and it adds up to
+`send_ms` of latency.
 
 A frame is sent when it is full (512 payload bytes), 2 ms after its first block, or before any
 STATUS/BYE, so latency is a few ms.

@@ -15,11 +15,11 @@ pages) can be watched, for example a second SID at `$D500`, the VIC, or a cartri
 | Capture core, wire format, decoder | host-tested (`make test`) |
 | Firmware glue (`WriteSnoop.h/.ino`) | host-tested against stubs; **compiles for the Teensy 4.1** (ARM GCC 13 from GitHub sources, `tools/armcheck`) on its own and together with teensyrom-vdrive |
 | `isrPHI2` cost | same registers saved as stock (checked in the ARM disassembly); a read cycle pays a compare and branch, an unwatched write ~7 instructions |
-| Patch | applies to upstream `136baa83` alone and with the vdrive patch, either order |
+| Patch | applies to upstream `6518b966` alone and with teensyrom-vdrive 0.9.0.45 (its HEAD), either order; vdrive + snoop compiles for the M7 (`tools/armcheck`) with the same `isrPHI2` saves |
 | Player (`trsid.py`) | renders to WAV; the live path (TCP, real time, `tools/fake_tr.py` as the TeensyROM) matches the offline render (62 dB, no underruns, `make test-live`); not tried on a sound card (the container has none) |
 | End to end with real tunes | three of the TeensyROM's bundled SIDs, played in a 6502 emulator, through the core, the wire and reSIDfp: every write at its exact cycle, audio equal to a direct render |
 | Teensyduino build (GCC 11.3, link, size) | **builds** in CI (`TeensyROM+_0.9_full.hex`; main image RAM1 free for locals 75004, padding 26888). `isrPHI2` saves `{r3-r9, sl, fp, lr}` (already every callee-saved register, so the hook cannot add saves); write cycles branch out to the page-map test; `SnoopTap` stores the entry before `head` |
-| **Hardware** | **not run** |
+| Hardware (owner, 2026-11-03, 0.9-sn1) | **works** over TCP and USB serial. TCP over a multi-hop WiFi link gave many late writes at the old 30 ms latency (now 250 ms by default on TCP). USB serial gave ~0 late writes but glitched or crashed cartridge games (Ms. Pac-Man): every USB transfer runs with interrupts off. 0.9-sn2 batches USB sends (20 ms); **not yet on hardware** |
 
 ## How it works
 
@@ -87,11 +87,19 @@ always uses it. A non-zero gap suits memory or screen writes, where only the ord
 While a capture streams on the USB serial port, other TeensyROM commands on that port still work, but
 their answers are mixed into the stream (the decoder skips them). Send them over TCP, or stop the capture first.
 
-Live play keeps 30 ms behind the C64 (transport margin) plus a 50 ms sound-card FIFO. It corrects
+Live play keeps `--latency` behind the C64 (the transport margin: 60 ms on USB serial, which batches its
+sends every 20 ms, and 250 ms on TCP, for WiFi) plus a 50 ms sound-card FIFO. It corrects
 drift between the C64 crystal and the sound card by dropping or repeating single samples. A write
 that arrives after its time was played is applied at once, a few ms late, and counted ("writes late"
-at the end). Raise `--latency` if that count grows: on a busy machine, the fake TeensyROM's own
-sends ran 10+ ms late.
+at the end). Raise `--latency` if that count grows and notes drop out. On the owner's multi-hop WiFi link,
+30 ms was far too little.
+
+**USB serial and cartridge games.** Every USB transfer the Teensy core starts (`schedule_transfer` in its
+`usb.c`) runs with all interrupts off, the bus interrupt included, and each small write starts one. At
+~500 transfers a second, 0.9-sn1 made cartridge games glitch or crash (Ms. Pac-Man) on USB serial, while TCP
+was fine. From 0.9-sn2 the TeensyROM sends at most every 20 ms on USB serial (or once 1 KB is waiting): about
+50 transfers a second. `--send-ms N` changes the interval. Longer is safer for the games, and adds latency.
+TCP sends at once, as before.
 
 `tools/fake_tr.py RECORDING` serves a recording on TCP like a TeensyROM, at the C64's pace, so the
 clients can be tried without hardware: `make demo`, then `tools/fake_tr.py build/demo/Popcorn.snoop`
@@ -103,14 +111,14 @@ and `host/trsid.py --tcp 127.0.0.1`.
 git clone https://github.com/SensoriumEmbedded/TeensyROM && cd TeensyROM
 git checkout $(cat ../teensyrom-snoop/firmware/UPSTREAM)
 git apply ../teensyrom-snoop/firmware/teensyrom-snoop.patch
-python3 ../teensyrom-snoop/tools/stamp_version.py .   # TRVersion 0.9 -> 0.9-sn1
+python3 ../teensyrom-snoop/tools/stamp_version.py .   # TRVersion 0.9 -> 0.9-sn2
 node tools/build-firmware.mjs --target tr-plus      # arduino-cli, teensy:avr@1.61.0, CRC32@2.0.1
 ```
 
-The stamp makes the build obvious: the TR menu's top line reads `TeensyROM+ v0.9-sn1`, and the hex is
-`TeensyROM+_0.9-sn1_full.hex`. The number is `firmware/SNREV`. The stamp is a separate step because
+The stamp makes the build obvious: the TR menu's top line reads `TeensyROM+ v0.9-sn2`, and the hex is
+`TeensyROM+_0.9-sn2_full.hex`. The number is `firmware/SNREV`. The stamp is a separate step because
 teensyrom-vdrive's patch rewrites the same `TRVersion` line. To add teensyrom-vdrive as well, apply its patch
-too (either order), then stamp: `0.9.0.45` becomes `0.9.0.45-sn1`.
+too (either order), then stamp: `0.9.0.45` becomes `0.9.0.45-sn2`.
 
 The TeensyROM's host tools read the version with `v[\d.]+` (`tools/lib/trserial.mjs`), so they show the
 part before `-sn1` (`v0.9`). The menu, the serial banner and the file name show all of it.
@@ -139,7 +147,7 @@ the registers `isrPHI2` saves (see the script for the repositories it needs).
 ## Decisions and assumptions (made while the owner was away; easy to revisit)
 
 1. **Default gap 0** (exact times), per the table above. The block grouping stays in the format.
-2. **Token `0x6453`** (`'d' 'S'`) for the command. It is unused upstream (checked at `136baa83`) and in teensyrom-vdrive
+2. **Token `0x6453`** (`'d' 'S'`) for the command. It is unused upstream (checked at `136baa83` and `6518b966`) and in teensyrom-vdrive
    (`0x64E3/E4`). It sits in `ProcessCommand`'s first switch, so it works while a program runs.
 3. **The stream goes to the channel that started it.** Serial or TCP, one capture at a time. A start
    from another channel takes over, and the old one gets BYE "replaced".

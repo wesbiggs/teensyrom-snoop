@@ -103,6 +103,7 @@ class Helpers(unittest.TestCase):
     def test_start_command(self):
         self.assertEqual(sp.start_command([(0xD400, 0xD41C)], 32),
                          bytes([0x64, 0x53, 1, 1, 0x00, 0xD4, 0x1C, 0xD4, 32, 0]))
+        self.assertEqual(sp.start_command([(0xD418, 0xD418)], 0, 50)[-2:], bytes([0, 50]))
 
 
 class Filter(unittest.TestCase):
@@ -121,7 +122,7 @@ class Filter(unittest.TestCase):
         s = Sim([(0xD400, 0xD41C), (0xD500, 0xD51C)], gap=7)
         s.stop(0)
         h = s.of(sp.Hello)[0]
-        self.assertEqual((h.version, h.phi2_hz, h.cpu_hz, h.max_gap), (1, PAL, CPU, 7))
+        self.assertEqual((h.version, h.phi2_hz, h.cpu_hz, h.max_gap), (sp.PROTO_VERSION, PAL, CPU, 7))
         self.assertEqual(h.ranges, [(0xD400, 0xD41C), (0xD500, 0xD51C)])
         self.assertEqual(s.of(sp.Bye)[0].reason, 0)
         self.assertEqual(len(s.of(sp.Status)), 1)

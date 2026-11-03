@@ -29,7 +29,7 @@ class Glue(unittest.TestCase):
         self.assertEqual([v for _, a, v in w[25:]], list(range(40)))            # held back while room was 0, not lost
         self.assertEqual([t2 - t1 for (t1, _, _), (t2, _, _) in zip(w[25:], w[26:])], [1] * 39)
         self.assertEqual(dec.lost_frames, 0)
-        self.assertEqual(dec.bad_frames, 2)     # the two ack tokens in the stream, skipped
+        self.assertIn(dec.bad_frames, (1, 2))   # the two ack tokens in the stream (one chunk when no frame went out between them), skipped
         self.assertEqual(sp.ACK in data[2:], True)                              # the status command's ack
         self.assertGreaterEqual(len([f for f in fr if isinstance(f, sp.Status)]), 2)
         self.assertIsInstance(fr[-1], sp.Bye)

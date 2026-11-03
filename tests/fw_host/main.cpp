@@ -26,7 +26,7 @@ volatile uint32_t StartCycCnt;
 uint32_t NowUs = 0;
 uint8_t BusData;
 uint32_t micros() { return NowUs; }
-uint32_t millis() { NowUs += 1000; return NowUs / 1000; }   // a millis() spin moves time on
+uint32_t millis() { NowUs += 1; return NowUs / 1000; }   // a millis() spin moves time on
 uint8_t DataPortWaitRead() { return BusData; }
 
 class Stream {
@@ -39,9 +39,11 @@ public:
    int read() { if (in.empty()) return -1; int c = in.front(); in.pop_front(); return c; }
    int availableForWrite() { return room; }
    size_t write(uint8_t b) { out.push_back(b); return 1; }
+   std::vector<uint32_t> bursts;   // NowUs of each write(p, n) call: one USB transfer each on the Teensy
    size_t write(const uint8_t *p, size_t n)
    {
       if ((int)n > room) { fprintf(stderr, "wrote past availableForWrite\n"); exit(1); }
+      bursts.push_back(NowUs);
       out.insert(out.end(), p, p + n); return n;
    }
    void println(const char *s) { while (*s) write((uint8_t)*s++); write('\n'); }
@@ -200,6 +202,28 @@ int main()
    CHECK(SnoopState.running);
    Command(&Serial, {0x64, 0x53, 0});
    CHECK(!SnoopState.running);
+   // 7. batching: USB serial sends at most every 20 ms (each write is a USB transfer with interrupts off),
+   //    TCP at once, and the start command's last byte sets the interval
+   {
+      tcpClient.up = true;
+      for (int pass = 0; pass < 3; pass++)
+      {
+         Stream *ch = pass == 0 ? (Stream *)&Serial : (Stream *)&tcpClient;
+         const uint8_t ms = pass == 2 ? 50 : 0;
+         Command(ch, {0x64, 0x53, 1, 1, 0x18, 0xD4, 0x18, 0xD4, 0, ms});
+         ch->bursts.clear();
+         const uint32_t t0 = NowUs;
+         for (int k = 0; k < 400; k++) { Cycle(0xD418, false, (uint8_t)k); Loop(); }   // 400 writes over 200 ms
+         const uint32_t secs_ms = (NowUs - t0) / 1000;
+         const size_t n = ch->bursts.size();
+         if (pass == 0) CHECK(n >= secs_ms / 20 - 1 && n <= secs_ms / 20 + 1);
+         if (pass == 1) CHECK(n >= 80);                                   // a frame every 2 ms or so, sent at once
+         if (pass == 2) CHECK(n >= secs_ms / 50 - 1 && n <= secs_ms / 50 + 1);
+         for (size_t i = 1; i < n && pass != 1; i++) CHECK(ch->bursts[i] - ch->bursts[i - 1] >= (pass == 0 ? 19000u : 49000u));
+         printf("fw_host: %s: %zu sends in %u ms\n", pass == 0 ? "USB serial" : pass == 1 ? "TCP" : "TCP at 50 ms", n, secs_ms);
+         Command(ch, {0x64, 0x53, 0});
+      }
+   }
 
    if (Fails) { fprintf(stderr, "fw_host: %d failed\n", Fails); return 1; }
    printf("fw_host: ok\n");

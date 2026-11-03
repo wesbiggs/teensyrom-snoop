@@ -138,7 +138,7 @@ class Live(unittest.TestCase):
         p = sidplay.LivePlayer(r, latency=0.03, buffer=0.05, now=ft)
         rng = np.random.default_rng(2)
         start = ft.t
-        p.feed(sp.Hello(1, PAL, 600_000_000, 0, [(0xD400, 0xD41C)]))
+        p.feed(sp.Hello(sp.PROTO_VERSION, PAL, 600_000_000, 0, [(0xD400, 0xD41C)]))
         blocks = [sp.Block(t, a, d) for t, a, d in tone_writes(2000, 0xD400, 440)]
         pending = [(start + 0.01, sp.Writes(0, blocks))]
         # a STATUS-like time mark every 10 ms (as frames of a busy tune would give)

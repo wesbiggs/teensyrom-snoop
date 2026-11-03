@@ -46,7 +46,10 @@ def main():
     ap.add_argument("--wav", help="write the audio to this WAV file")
     ap.add_argument("--no-play", action="store_true", help="live: record only, no sound card")
     ap.add_argument("--seconds", type=float, default=0, help="live: stop after this long")
-    ap.add_argument("--latency", type=float, default=0.03, help="live: seconds behind the C64 (transport margin)")
+    ap.add_argument("--latency", type=float, help="live: seconds behind the C64, the transport margin "
+                    "(default 0.06 on USB serial, 0.25 on TCP: raise it if 'writes late' grows)")
+    ap.add_argument("--send-ms", type=int, default=0, help="how often the TeensyROM sends, ms (default: 20 on USB "
+                    "serial, at once on TCP). Every USB transfer briefly stops the bus interrupt: do not go below 20 on USB")
     ap.add_argument("--buffer", type=float, default=0.05, help="live: sound card FIFO target, seconds")
     a = ap.parse_args()
 
@@ -77,12 +80,13 @@ def main():
 
     from trsnoop import SerialChan, TcpChan, wait_ack
     ch = TcpChan(a.tcp, a.tcp_port) if a.tcp else SerialChan(a.port)
-    ch.write(sp.start_command([(b, b + 0x1C) for b in bases], 0))
+    ch.write(sp.start_command([(b, b + 0x1C) for b in bases], 0, a.send_ms))
     ok, rest = wait_ack(ch)
     if not ok:
         sys.exit(1)
 
-    player = sidplay.LivePlayer(sidplay.SidRenderer(**kw), latency=a.latency, buffer=a.buffer)
+    latency = a.latency if a.latency is not None else (0.25 if a.tcp else 0.06)
+    player = sidplay.LivePlayer(sidplay.SidRenderer(**kw), latency=latency, buffer=a.buffer)
     recorded = []
     stop = threading.Event()
 

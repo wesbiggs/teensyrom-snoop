@@ -8,6 +8,18 @@
 bool SnoopReady = false;
 bool SnoopDtrAtStart = false;   // a USB serial run whose host had DTR up: stop when it drops (port closed)
 
+// Sending in batches.  Every USB transfer the Teensy core starts (schedule_transfer in usb.c) runs with
+// all interrupts off, the phi2 ISR included, and a small write starts one of its own.  Streaming in small
+// pieces (~500 transfers/s) made cartridge games glitch or crash (Ms. Pac-Man) while TCP was fine.  So the
+// output goes out at most every SnoopSendEveryMs (20 on USB serial unless the start command asks for
+// another value; 0 = at once, TCP's default), or when SnoopBatchBytes are waiting, in as few writes as
+// the channel takes.
+#define SnoopUsbDefaultMs  20
+#define SnoopBatchBytes    1024
+uint32_t SnoopSendEveryMs = 0;
+uint32_t SnoopLastSendMs = 0;
+DMAMEM uint8_t SnoopTxBuf[2048];   // one USB serial transmit buffer (TX_SIZE) per write
+
 FLASHMEM void SnoopSetup()
 {
    if (SnoopReady) return;
@@ -24,13 +36,12 @@ FLASHMEM uint32_t SnoopPhi2Hz()
 // (EthernetClient::write busy-waits for buffer space; USB serial waits for the host).
 FLASHMEM void SnoopSend(Stream *Out)
 {
-   uint8_t Buf[512];
    while (snoop_out_avail(&SnoopState))
    {
       int Room = Out->availableForWrite();
       if (Room <= 0) return;
-      uint32_t n = snoop_out_take(&SnoopState, Buf, Room < (int)sizeof Buf ? (uint32_t)Room : sizeof Buf);
-      Out->write(Buf, n);
+      uint32_t n = snoop_out_take(&SnoopState, SnoopTxBuf, Room < (int)sizeof SnoopTxBuf ? (uint32_t)Room : sizeof SnoopTxBuf);
+      Out->write(SnoopTxBuf, n);
    }
 }
 
@@ -96,8 +107,7 @@ FLASHMEM void SnoopCommand()
       Ranges[i].first = (uint16_t)(b[0] | b[1] << 8);
       Ranges[i].last  = (uint16_t)(b[2] | b[3] << 8);
    }
-   if (!SnoopGetByte(&Gap) || !SnoopGetByte(&Flags)) return;
-   (void)Flags;
+   if (!SnoopGetByte(&Gap) || !SnoopGetByte(&Flags)) return;   // Flags: send interval in ms, 0 = the channel's default
 
    int Res = snoop_check(Ranges, N);   // before anything stops: a refused start leaves a running capture alone
    if (Res == 0)
@@ -122,6 +132,8 @@ FLASHMEM void SnoopCommand()
    // Only a host that raised DTR can be seen closing the port (pyserial raises it; some
    // serial libraries leave it down by default, and then the run goes on until stopped).
    SnoopDtrAtStart = (SnoopOut == (Stream *)&Serial) && Serial.dtr();
+   SnoopSendEveryMs = Flags ? Flags : (SnoopOut == (Stream *)&Serial ? SnoopUsbDefaultMs : 0);
+   SnoopLastSendMs = millis();
 }
 
 // From loop(), every pass.
@@ -145,7 +157,13 @@ FLASHMEM void SnoopService()
       return;
    }
    snoop_poll(&SnoopState, micros(), ARM_DWT_CYCCNT);
-   SnoopSend(SnoopOut);
+   const uint32_t Now = millis();
+   if (snoop_out_avail(&SnoopState) &&
+       (snoop_out_avail(&SnoopState) >= SnoopBatchBytes || Now - SnoopLastSendMs >= SnoopSendEveryMs))
+   {
+      SnoopSend(SnoopOut);
+      SnoopLastSendMs = Now;
+   }
 }
 
 #endif

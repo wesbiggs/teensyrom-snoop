@@ -7,7 +7,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
-PROTO_VERSION = 1
+PROTO_VERSION = 2
 
 F_HELLO, F_WRITES, F_STATUS, F_BYE = 0x01, 0x02, 0x03, 0x04
 BYE_REASONS = {0: "stopped", 1: "replaced", 2: "channel"}
@@ -235,16 +235,20 @@ def parse_range(text: str) -> tuple[int, int]:
     return first, last
 
 
-def start_command(ranges: list[tuple[int, int]], max_gap: int = 0) -> bytes:
+def start_command(ranges: list[tuple[int, int]], max_gap: int = 0, send_ms: int = 0) -> bytes:
+    """send_ms: how often the TeensyROM sends (ms, 1-255); 0 = its default for the channel
+    (20 ms on USB serial, where each transfer briefly stops the bus ISR; at once on TCP)."""
     if not 1 <= len(ranges) <= 16:
         raise ValueError("1 to 16 ranges")
     if not 0 <= max_gap <= 255:
         raise ValueError("max_gap 0-255")
+    if not 0 <= send_ms <= 255:
+        raise ValueError("send_ms 0-255")
     b = bytearray([CMD_LEAD, CMD_SNOOP, OP_START, len(ranges)])
     for first, last in ranges:
         b += struct.pack("<HH", first, last)
     b.append(max_gap)
-    b.append(0)  # flags, reserved
+    b.append(send_ms)
     return bytes(b)
 
 

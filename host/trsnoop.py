@@ -120,6 +120,8 @@ def main():
     ap.add_argument("--tcp-port", type=int, default=2112)
     ap.add_argument("--range", action="append", default=[], help="hex address or range (repeatable)")
     ap.add_argument("--gap", type=int, default=0, help="C64 cycles a write may follow the previous one and still join its block, sharing its time; 0 (default) = every write exactly timed. For the SID keep 0: see README")
+    ap.add_argument("--send-ms", type=int, default=0, help="how often the TeensyROM sends, ms (default: 20 on USB serial, "
+                    "at once on TCP). Every USB transfer briefly stops the bus interrupt: do not go below 20 on USB")
     ap.add_argument("--raw", help="also write the received bytes to this file")
     ap.add_argument("--seconds", type=float, default=0, help="stop after this long (0 = until Ctrl-C)")
     ap.add_argument("--quiet", action="store_true", help="only HELLO/STATUS/BYE lines")
@@ -140,7 +142,7 @@ def main():
     if not a.range:
         ap.error("at least one --range")
     ranges = [sp.parse_range(r) for r in a.range]
-    ch.write(sp.start_command(ranges, a.gap))
+    ch.write(sp.start_command(ranges, a.gap, a.send_ms))
     ok, rest = wait_ack(ch)
     if not ok:
         ch.close()
