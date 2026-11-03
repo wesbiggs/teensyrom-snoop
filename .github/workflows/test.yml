@@ -81,7 +81,7 @@ jobs:
             if [ -n "$ELF" ] && [ -n "$OBJDUMP" ]; then
               echo '### isrPHI2 (check the prologue: no extra register saves from the tap)'
               echo '```'
-              "$OBJDUMP" -d --no-show-raw-insn "$ELF" | awk '/<isrPHI2>:/{p=1} p{print; if (++n>90) exit}'
+              "$OBJDUMP" -d --no-show-raw-insn "$ELF" | awk '/<_Z7isrPHI2v>:/{p=1} p{print; if (++n>90) exit}'
               echo '```'
               echo '### SnoopTap'
               echo '```'
