@@ -109,6 +109,10 @@ neither, and nor does TCP. Every USB transmit goes through `schedule_transfer()`
 runs with all interrupts off while it polls USB registers. `tools/teensy_core_usb_basepri.py <cores/teensy4>`
 (experimental; `--revert` undoes it) masks only priority 32 and lower there (`BASEPRI`), so the phi2 interrupt
 (priority 16) keeps running. Patch the installed Teensyduino core, rebuild, rerun the ping test.
+**On hardware (owner, 2026-11-03):** with the patch, no interrupt over USB is late by more than 250 ns, and Ms. Pac-Man
+lasts a minute to several minutes instead of crashing at once. It still crashes eventually, without any late interrupt to
+show for it, so that cause is open. Long runs with no capture and over TCP come next; if only USB crashes, the Mac's
+ground or 5 V through USB is the suspect (try a powered hub or a USB isolator).
 
 **Port 2113 (0.9-sn4).** Over TCP the clients connect to snoop's own data port, 2113, and the stream stays on that
 connection. The TeensyROM's port 2112 stays free for other tools during a capture (`trls`, `trvdrive`, file

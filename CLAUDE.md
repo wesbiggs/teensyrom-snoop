@@ -40,8 +40,12 @@ misbehaves on USB (owner), cause not settled. 0.9-sn3: Nagle batching on TCP, la
 no missed cycles and only 12 >250 ns late interrupts in 16 s (8 in the crash second): the USB data path is not clearly
 the cause. **Settled (owner): any USB write from the TeensyROM does it, stock firmware too** (pings over USB crash
 Ms. Pac-Man; a merely open port does not): `schedule_transfer()` in the Teensy core's `usb.c` runs with all interrupts
-off. Experiment: `tools/teensy_core_usb_basepri.py` (BASEPRI 32 there, the phi2 interrupt at 16 keeps running); not yet
-on hardware. Keep USB writes few and large.
+off. `tools/teensy_core_usb_basepri.py` (BASEPRI 32 there, the phi2 interrupt at 16 keeps running) **on hardware (owner,
+2026-11-03): no interrupt >250 ns late on USB any more** (only more small lateness: ~800/s against TCP's 300-400), and
+Ms. Pac-Man lasts a minute to several minutes instead of crashing at once, **but still crashes**: not explained by late
+interrupts. `--send-ms 5` and `200` changed neither the counts nor clearly the crash time. Next: ~10-minute runs with no
+capture and over TCP (TCP runs so far were ~16 s); if only USB crashes, suspect ground/power from the Mac (powered hub or
+USB isolator). Keep USB writes few and large.
 0.9-sn4: snoop's own TCP data port 2113 (`SnoopDataPortService`; the clients try it first, then 2112); host-tested, not
 on hardware. NativeEthernet's `EthernetServer::available()` blocks up to 10 s for a new client's first bytes.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
