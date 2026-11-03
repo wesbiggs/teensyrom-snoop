@@ -10,18 +10,18 @@ jobs:
   host:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: snoop
       - name: Pinned upstream (its bundled SID tunes feed the end-to-end test)
         id: up
         run: echo "sha=$(cat snoop/firmware/UPSTREAM)" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: SensoriumEmbedded/TeensyROM
           ref: ${{ steps.up.outputs.sha }}
           path: tr
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
       - run: sudo apt-get update && sudo apt-get install -y clang
@@ -34,13 +34,13 @@ jobs:
     # the patch on the pinned upstream TeensyROM (firmware/UPSTREAM), built for the TR+ like upstream's CI
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: snoop
       - name: Pinned upstream
         id: up
         run: echo "sha=$(cat snoop/firmware/UPSTREAM)" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: SensoriumEmbedded/TeensyROM
           ref: ${{ steps.up.outputs.sha }}
@@ -50,7 +50,7 @@ jobs:
           python3 snoop/tools/make_tr_patch.py tr --out /tmp/regen.patch
           diff -u snoop/firmware/teensyrom-snoop.patch /tmp/regen.patch
           git -C tr apply ../snoop/firmware/teensyrom-snoop.patch
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: tr/.nvmrc
       - name: Install arduino-cli and the Teensy core
@@ -89,7 +89,7 @@ jobs:
               echo '```'
             fi
           } | tee -a "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: firmware
           path: tr/build/firmware/*.hex
