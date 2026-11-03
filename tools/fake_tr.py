@@ -3,7 +3,7 @@
 with AckToken, then plays a recorded stream (trsnoop.py --raw / sidtrace.py --snoop) at the C64's
 pace (each frame sent when its time comes), and answers stop with Ack + BYE.
 
-  tools/fake_tr.py build/demo/Popcorn.snoop [--port 2112] [--once]
+  tools/fake_tr.py build/demo/Popcorn.snoop [--port 2113] [--once]
 """
 import argparse
 import os
@@ -71,7 +71,7 @@ def serve(conn, frames):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("recording")
-    ap.add_argument("--port", type=int, default=2112)
+    ap.add_argument("--port", type=int, default=2113)
     ap.add_argument("--once", action="store_true")
     a = ap.parse_args()
     frames = frames_with_times(open(a.recording, "rb").read())

@@ -37,7 +37,7 @@ def main():
     g.add_argument("--port", help="TeensyROM USB serial port")
     g.add_argument("--tcp", help="TeensyROM IP address (TCP 2112)")
     g.add_argument("--replay", help="a file written by trsnoop.py --raw")
-    ap.add_argument("--tcp-port", type=int, default=2112)
+    ap.add_argument("--tcp-port", type=int, help="default: the snoop data port 2113, or 2112 when the firmware has none")
     ap.add_argument("--sid", action="append", default=[], help="SID base address, hex (default D400; repeat for more)")
     ap.add_argument("--stereo", action="store_true", help="SID 1 left, SID 2 right")
     ap.add_argument("--model", choices=["6581", "8580"], default="6581")

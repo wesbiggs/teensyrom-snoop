@@ -42,5 +42,7 @@ the cause. **Settled (owner): any USB write from the TeensyROM does it, stock fi
 Ms. Pac-Man; a merely open port does not): `schedule_transfer()` in the Teensy core's `usb.c` runs with all interrupts
 off. Experiment: `tools/teensy_core_usb_basepri.py` (BASEPRI 32 there, the phi2 interrupt at 16 keeps running); not yet
 on hardware. Keep USB writes few and large.
+0.9-sn4: snoop's own TCP data port 2113 (`SnoopDataPortService`; the clients try it first, then 2112); host-tested, not
+on hardware. NativeEthernet's `EthernetServer::available()` blocks up to 10 s for a new client's first bytes.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
 file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.

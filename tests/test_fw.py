@@ -56,5 +56,16 @@ class Glue(unittest.TestCase):
         self.assertEqual(fr[-1].reason, 0)
 
 
+class DataPort(unittest.TestCase):
+    def test_stream_on_2113(self):
+        dec, fr, data = frames("fw_dataport.bin")
+        self.assertTrue(data.startswith(sp.ACK))
+        self.assertEqual(fr[0].ranges, [(0xD418, 0xD418)])
+        self.assertEqual([v for _, a, v in sp.writes_of(fr)], [0x30 + k for k in range(6)] + [0x40 + k for k in range(4)])
+        self.assertIn(b"only the snoop command", data)
+        self.assertGreaterEqual(len([f for f in fr if isinstance(f, sp.Status)]), 1)
+        self.assertEqual(dec.lost_frames, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

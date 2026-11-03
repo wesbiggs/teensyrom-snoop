@@ -110,6 +110,11 @@ runs with all interrupts off while it polls USB registers. `tools/teensy_core_us
 (experimental; `--revert` undoes it) masks only priority 32 and lower there (`BASEPRI`), so the phi2 interrupt
 (priority 16) keeps running. Patch the installed Teensyduino core, rebuild, rerun the ping test.
 
+**Port 2113 (0.9-sn4).** Over TCP the clients connect to snoop's own data port, 2113, and the stream stays on that
+connection. The TeensyROM's port 2112 stays free for other tools during a capture (`trls`, `trvdrive`, file
+transfers), within the TeensyROM's own limits: most commands answer "Busy!" while a program runs. With firmware
+before sn4 the clients fall back to 2112 by themselves (`--tcp-port` picks one).
+
 On TCP (0.9-sn3) the default is Nagle's rule, as in upstream's SwiftLink Tx (PR #80): send at once while
 everything sent earlier has been acknowledged, otherwise collect until 1 KB or 20 ms. A fast LAN keeps
 near-zero latency, and a slow link gets fewer, larger segments instead of one small one every ~2 ms.
@@ -125,14 +130,14 @@ and `host/trsid.py --tcp 127.0.0.1`.
 git clone https://github.com/SensoriumEmbedded/TeensyROM && cd TeensyROM
 git checkout $(cat ../teensyrom-snoop/firmware/UPSTREAM)
 git apply ../teensyrom-snoop/firmware/teensyrom-snoop.patch
-python3 ../teensyrom-snoop/tools/stamp_version.py .   # TRVersion 0.9 -> 0.9-sn3
+python3 ../teensyrom-snoop/tools/stamp_version.py .   # TRVersion 0.9 -> 0.9-sn4
 node tools/build-firmware.mjs --target tr-plus      # arduino-cli, teensy:avr@1.61.0, CRC32@2.0.1
 ```
 
-The stamp makes the build obvious: the TR menu's top line reads `TeensyROM+ v0.9-sn3`, and the hex is
-`TeensyROM+_0.9-sn3_full.hex`. The number is `firmware/SNREV`. The stamp is a separate step because
+The stamp makes the build obvious: the TR menu's top line reads `TeensyROM+ v0.9-sn4`, and the hex is
+`TeensyROM+_0.9-sn4_full.hex`. The number is `firmware/SNREV`. The stamp is a separate step because
 teensyrom-vdrive's patch rewrites the same `TRVersion` line. To add teensyrom-vdrive as well, apply its patch
-too (either order), then stamp: `0.9.0.45` becomes `0.9.0.45-sn3`.
+too (either order), then stamp: `0.9.0.45` becomes `0.9.0.45-sn4`.
 
 The TeensyROM's host tools read the version with `v[\d.]+` (`tools/lib/trserial.mjs`), so they show the
 part before `-sn1` (`v0.9`). The menu, the serial banner and the file name show all of it.

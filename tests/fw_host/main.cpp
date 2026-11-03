@@ -38,6 +38,7 @@ public:
    virtual ~Stream() {}
    int available() { return (int)in.size(); }
    int read() { if (in.empty()) return -1; int c = in.front(); in.pop_front(); return c; }
+   int peek() { return in.empty() ? -1 : in.front(); }
    int availableForWrite() { return room; }
    size_t write(uint8_t b) { out.push_back(b); return 1; }
    std::vector<uint32_t> bursts;   // NowUs of each write(p, n) call: one USB transfer each on the Teensy
@@ -58,9 +59,37 @@ public:
 
 class EthernetClient : public Stream {
 public:
-   bool up = true;
+   bool up = false;
+   bool assigned = false;          // operator bool: holds a socket (a new EthernetClient holds none, as NativeEthernet's)
    bool connected() { return up; }
+   operator bool() { return assigned; }
+   void stop() { assigned = up = false; }
 };
+
+// NativeEthernet's server, as far as the glue uses it: available() hands over a client that has sent something
+class EthernetServer {
+public:
+   EthernetClient pending;
+   bool has = false;
+   int calls = 0;
+   explicit EthernetServer(uint16_t) { pending.assigned = pending.up = false; }
+   EthernetClient available()
+   {
+      calls++;
+      if (has) { has = false; return pending; }
+      EthernetClient none;
+      none.assigned = none.up = false;
+      return none;
+   }
+   void offer(const std::vector<uint8_t> &bytes)   // a client connects and sends these
+   {
+      pending = EthernetClient();
+      pending.assigned = pending.up = true;
+      pending.feed(bytes);
+      has = true;
+   }
+};
+bool NetListenEnable = true;
 
 class UsbSerial : public Stream {
 public:
@@ -129,6 +158,7 @@ static void Dump(const char *path, const Stream &s)
 
 int main()
 {
+   tcpClient.assigned = tcpClient.up = true;   // a client on 2112
    // 1. serial: start SID $D400-$D41C, gap 32; a register dump, reads and other writes ignored
    Command(&Serial, {0x64, 0x53, 1, 1, 0x00, 0xD4, 0x1C, 0xD4, 32, 0});
    CHECK(Serial.out.size() == 2 && Serial.out[0] == 0xCC && Serial.out[1] == 0x64);
@@ -231,6 +261,43 @@ int main()
                 pass == 2 ? "TCP at 50 ms" : "TCP, data in flight", n, secs_ms);
          Command(ch, {0x64, 0x53, 0});
       }
+   }
+
+   // 8. the data port (2113): start and stream there, 2112 stays free, junk and other commands refused there
+   {
+      tcpClient = EthernetClient();                     // a client on 2112, idle
+      tcpClient.assigned = tcpClient.up = true;
+      NetListenEnable = false;
+      SnoopServer.offer({0x64, 0x53, 1, 1, 0x18, 0xD4, 0x18, 0xD4, 0, 0});
+      Loop(3);
+      CHECK(!SnoopState.running && SnoopServer.has);   // Ethernet not up: not even listening
+      NetListenEnable = true;
+      Loop();
+      CHECK(SnoopState.running && SnoopOut == (Stream *)&SnoopClient);
+      CHECK(SnoopClient.out.size() >= 2 && SnoopClient.out[0] == 0xCC && SnoopClient.out[1] == 0x64);
+      for (int k = 0; k < 6; k++) { Cycle(0xD418, false, (uint8_t)(0x30 + k)); Loop(); }
+      Command(&tcpClient, {0x64, 0x53, 2});            // a command on 2112: answered there, the stream stays put
+      CHECK(tcpClient.out.size() == 2 && tcpClient.out[0] == 0xCC);
+      CHECK(SnoopOut == (Stream *)&SnoopClient);
+      SnoopClient.feed({0x00, 0x64});                  // junk, then a lead whose token comes later
+      Loop();
+      CHECK(SnoopClient.available() == 1);
+      SnoopClient.feed({0x55});                        // ping: not served on the data port
+      Loop();
+      std::string txt(SnoopClient.out.begin(), SnoopClient.out.end());
+      CHECK(txt.find("only the snoop command") != std::string::npos);
+      SnoopClient.feed({0x64, 0x53, 2});               // status over the data port
+      for (int k = 0; k < 4; k++) { Cycle(0xD418, false, (uint8_t)(0x40 + k)); Loop(); }
+      Loop(10);
+      Dump("build/fw_dataport.bin", SnoopClient);
+      SnoopClient.up = false;                          // the client goes: the run stops, the slot frees
+      Loop();
+      CHECK(!SnoopState.running && SnoopOut == NULL && !SnoopClient);
+      SnoopServer.offer({0x64, 0x53, 1, 1, 0x18, 0xD4, 0x18, 0xD4, 0, 0});   // and the next one is taken
+      Loop();
+      CHECK(SnoopState.running && SnoopOut == (Stream *)&SnoopClient);
+      Command(&SnoopClient, {0x64, 0x53, 0});
+      CHECK(!SnoopState.running);
    }
 
    if (Fails) { fprintf(stderr, "fw_host: %d failed\n", Fails); return 1; }

@@ -5,8 +5,16 @@ All multi-byte numbers are little-endian unless marked otherwise. `varint` is un
 
 ## Commands (host to TeensyROM)
 
-On the TeensyROM's command channel (USB serial, or TCP port 2112), like its other remote commands.
-They work while a C64 program runs (they are in the always-available part of `ProcessCommand`).
+On **TCP port 2113**, snoop's own data port (firmware 0.9-sn4+), or on the TeensyROM's command channel (USB
+serial, or TCP port 2112) like its other remote commands. They work while a C64 program runs (they are in the
+always-available part of `ProcessCommand`).
+
+**Port 2113** takes only these commands; anything else gets `7F 9B` and a line of text. The stream goes back on
+the same connection, so port 2112 stays free for other tools during a capture (`trls`, `trvdrive`, file
+transfers). The TeensyROM serves one client on each port. NativeEthernet hands a new connection over only once
+it has sent something, and waits up to 10 s for that while holding up the TeensyROM's main loop: send the
+command right after connecting. The port listens once the TeensyROM's Ethernet is up (when its own 2112
+listens). The protocol on 2113 is the same; only the port is new, so the version stays 3.
 
 | bytes | meaning |
 |---|---|

@@ -27,6 +27,17 @@ uint32_t SnoopSendEveryMs = 0;
 uint32_t SnoopLastSendMs = 0;
 DMAMEM uint8_t SnoopTxBuf[2048];   // one USB serial transmit buffer (TX_SIZE) per write
 
+#ifdef FeatTCPListen
+// The data port (0.9-sn4).  A client connects to SnoopDataPort and sends the same commands there; the stream
+// goes back on that connection, so the TeensyROM's own port (2112) stays free for other tools (trls, trvdrive,
+// file transfers) during a capture.  A start on 2112 or USB serial still works as before.
+// NativeEthernet's EthernetServer::available() listens on first call, and hands over a client only once it has
+// sent something, waiting up to 10 s for that: a client must send its command right after connecting.
+#define SnoopDataPort 2113
+EthernetServer SnoopServer(SnoopDataPort);
+EthernetClient SnoopClient;
+#endif
+
 FLASHMEM void SnoopSetup()
 {
    if (SnoopReady) return;
@@ -141,17 +152,58 @@ FLASHMEM void SnoopCommand()
    SnoopDtrAtStart = (SnoopOut == (Stream *)&Serial) && Serial.dtr();
    SnoopSendEveryMs = Flags ? Flags : (SnoopOut == (Stream *)&Serial ? SnoopUsbDefaultMs : SnoopTcpMaxMs);
 #ifdef FeatTCPListen
-   SnoopNagle = !Flags && SnoopOut == (Stream *)&tcpClient;
+   SnoopNagle = !Flags && (SnoopOut == (Stream *)&tcpClient || SnoopOut == (Stream *)&SnoopClient);
 #endif
    SnoopLastSendMs = millis();
 }
 
+#ifdef FeatTCPListen
+// The data port: accept a client, run the commands it sends (the same 0x64 0x53 ... as on 2112), drop it when
+// it goes.  CmdChannel points at it while a command runs, so SnoopCommand() reads and answers there.
+FLASHMEM void SnoopDataPortService()
+{
+   if (!NetListenEnable) return;   // Ethernet not up (the TeensyROM's own port is not listening either)
+   if (!SnoopClient) SnoopClient = SnoopServer.available();
+   if (!SnoopClient) return;
+   if (!SnoopClient.connected())
+   {
+      if (SnoopOut == (Stream *)&SnoopClient)
+      {
+         snoop_stop(&SnoopState, SNOOP_BYE_CHANNEL, micros(), ARM_DWT_CYCCNT);
+         SnoopFlushTo(NULL, 0);
+         SnoopOut = NULL;
+      }
+      SnoopClient.stop();
+      return;
+   }
+   while (SnoopClient.available())
+   {
+      if (SnoopClient.peek() != 0x64) { SnoopClient.read(); continue; }   // anything but a command lead is ignored
+      if (SnoopClient.available() < 2) break;            // the token byte on a later pass (GetUInt waits for the rest)
+      SnoopClient.read();
+      Stream *Was = CmdChannel;
+      CmdChannel = &SnoopClient;
+      if (SnoopClient.read() == (SnoopToken & 0xFF)) SnoopCommand();
+      else
+      {
+         SendU16(FailToken);
+         CmdChannel->println("Snoop data port: only the snoop command (0x64 0x53)");
+      }
+      CmdChannel = Was;
+   }
+}
+#endif
+
 // From loop(), every pass.
 FLASHMEM void SnoopService()
 {
+#ifdef FeatTCPListen
+   SnoopDataPortService();
+#endif
    if (!SnoopReady || SnoopOut == NULL) return;
 #ifdef FeatTCPListen
-   if (SnoopOut == &tcpClient && !tcpClient.connected())
+   if ((SnoopOut == (Stream *)&tcpClient && !tcpClient.connected()) ||
+       (SnoopOut == (Stream *)&SnoopClient && !SnoopClient.connected()))
    {
       snoop_stop(&SnoopState, SNOOP_BYE_CHANNEL, micros(), ARM_DWT_CYCCNT);
       SnoopFlushTo(NULL, 0);
@@ -171,7 +223,7 @@ FLASHMEM void SnoopService()
    const uint32_t Avail = snoop_out_avail(&SnoopState);
    bool Due = Avail && (Avail >= SnoopBatchBytes || Now - SnoopLastSendMs >= SnoopSendEveryMs);
 #ifdef FeatTCPListen
-   if (Avail && !Due && SnoopNagle) Due = tcpClient.availableForWrite() >= FNET_SOCKET_DEFAULT_SIZE;   // nothing in flight
+   if (Avail && !Due && SnoopNagle) Due = SnoopOut->availableForWrite() >= FNET_SOCKET_DEFAULT_SIZE;   // nothing in flight
 #endif
    if (Due)
    {
