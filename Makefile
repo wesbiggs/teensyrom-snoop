@@ -32,7 +32,7 @@ test-player:
 	$(PYTHON) -m unittest -v tests/test_sidplay.py
 
 # real tunes end to end (skipped without py65 + pyresidfp + a TeensyROM checkout: TEENSYROM=...)
-TEENSYROM ?= ../3p/TeensyROM
+TEENSYROM ?= ../../3p/TeensyROM
 test-e2e: build/libsnoop.so
 	TEENSYROM=$(TEENSYROM) $(PYTHON) -m unittest -v tests/test_e2e.py
 
