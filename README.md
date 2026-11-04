@@ -87,12 +87,20 @@ always uses it. A non-zero gap suits memory or screen writes, where only the ord
 While a capture streams on the USB serial port, other TeensyROM commands on that port still work, but
 their answers are mixed into the stream (the decoder skips them). Send them over TCP, or stop the capture first.
 
-Live play keeps `--latency` behind the C64 (the transport margin: 60 ms on USB serial, which batches its
-sends every 20 ms, and 250 ms on TCP, for WiFi) plus a 50 ms sound-card FIFO. It corrects
-drift between the C64 crystal and the sound card by dropping or repeating single samples. A write
-that arrives after its time was played is applied at once, a few ms late, and counted ("writes late"
-at the end). Raise `--latency` if that count grows and notes drop out. On the owner's multi-hop WiFi link,
-30 ms was far too little.
+Live play stays a little behind the C64, so that writes arriving over the link are in hand before their time is
+played. **By default the delay is automatic:** the player measures how late each frame arrives (its oldest write
+against the estimated C64 "now"), and keeps the delay at the 99th percentile of the last 6 s plus 10 ms. It never
+goes below 15 ms or above 500 ms, rises by at most 50 ms a second and falls by at most 10 ms a second. A fast link
+settles near 15 ms; simulated 20 ms jitter settles near 30 ms. `--latency S` fixes it instead. After the delay comes a
+30 ms sound-card FIFO (`--buffer`), and the sound card's own buffer (`sounddevice` asked for its low-latency
+setting; `trsid.py` prints what it got). Drift between the C64 crystal and the sound card is corrected by dropping or
+repeating single samples. A write that arrives after its time was played is applied at once, a few ms late, and
+counted ("writes late" at the end). `--isr` lines also show the current delay.
+
+Until this change the default was a fixed 250 ms on TCP (chosen in sn2 for the owner's multi-hop WiFi, where 30 ms
+was far too little). That, not the firmware's Nagle batching (at most one round trip, ~10-20 ms there), made TCP
+play noticeably late. On TCP the TeensyROM's Nagle wait can be replaced by a fixed interval with `--send-ms 4`
+(about 250 small packets a second), which trades some of that round trip for more packets.
 
 **USB serial and cartridge games.** Every USB transfer the Teensy core starts (`schedule_transfer` in its
 `usb.c`) runs with all interrupts off, the bus interrupt included, and each small write starts one. At

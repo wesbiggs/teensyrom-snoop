@@ -167,5 +167,61 @@ class Live(unittest.TestCase):
         self.assertLess(p.dropped + p.repeated, 0.006 * 6 * RATE)
 
 
+@unittest.skipUnless(HAVE, "pyresidfp and numpy not installed")
+class AutoLatency(unittest.TestCase):
+    def run_link(self, jitter, seconds=12.0, spikes=0.0):
+        """Frames every 2 ms of C64 time arrive after 1 ms + jitter (and a rare spike); the sound card
+        takes 256 samples at a time. Returns the player and the latency history."""
+        ft = FakeTime()
+        r = sidplay.SidRenderer(bases=[0xD400], sample_rate=RATE)
+        p = sidplay.LivePlayer(r, now=ft)          # automatic latency
+        rng = np.random.default_rng(3)
+        start = ft.t
+        p.feed(sp.Hello(sp.PROTO_VERSION, PAL, 600_000_000, 0, [(0xD400, 0xD41C)]))
+        pending = []
+        seq = 0
+        notes = tone_writes(2000, 0xD400, 440)
+        for k in range(1, int(seconds / 0.002)):
+            t = int(k * 0.002 * PAL)
+            blocks = [sp.Block(t, 0xD401, bytes([k & 0x3F]))]       # a write in every frame
+            if k == 1:
+                blocks = [sp.Block(bt, a, d) for bt, a, d in notes] + blocks
+            delay = 0.001 + rng.uniform(0, jitter)
+            if spikes and rng.random() < spikes:
+                delay += 0.05
+            pending.append((start + k * 0.002 + delay, sp.Writes(seq, blocks)))
+            seq += 1
+        pending.sort(key=lambda x: x[0])
+        history = []
+        t_next_cb = start + 0.05
+        while ft.t < start + seconds:
+            ft.t += 0.001
+            while pending and pending[0][0] <= ft.t:
+                p.feed(pending.pop(0)[1])
+            p.pump()
+            while t_next_cb <= ft.t:
+                p.fill(256)
+                t_next_cb += 256 / RATE
+            history.append(p.latency)
+        return p, history
+
+    def test_settles_just_above_the_jitter(self):
+        p, hist = self.run_link(jitter=0.020)
+        self.assertGreater(p.latency, 0.025)                  # 1 ms + up to 20 ms, + 10 ms margin
+        self.assertLess(p.latency, 0.040)
+        self.assertEqual(p.underruns, 0)
+        self.assertLess(p.r.late, 0.01 * 6000)                 # under 1 % of the ~6000 writes
+
+    def test_fast_link_gets_low_latency(self):
+        p, hist = self.run_link(jitter=0.002)
+        self.assertLess(p.latency, 0.020)
+        self.assertEqual(p.underruns, 0)
+
+    def test_rare_spikes_are_ridden_out(self):
+        p, hist = self.run_link(jitter=0.005, spikes=0.002)    # 0.2 % of frames 50 ms late
+        self.assertLess(p.latency, 0.045)
+        self.assertEqual(p.underruns, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

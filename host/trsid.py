@@ -46,11 +46,11 @@ def main():
     ap.add_argument("--wav", help="write the audio to this WAV file")
     ap.add_argument("--no-play", action="store_true", help="live: record only, no sound card")
     ap.add_argument("--seconds", type=float, default=0, help="live: stop after this long")
-    ap.add_argument("--latency", type=float, help="live: seconds behind the C64, the transport margin "
-                    "(default 0.06 on USB serial, 0.25 on TCP: raise it if 'writes late' grows)")
+    ap.add_argument("--latency", type=float, help="live: seconds behind the C64 (the transport margin), fixed. "
+                    "Default: automatic, just above how late frames arrive (99th percentile + 10 ms)")
     ap.add_argument("--send-ms", type=int, default=0, help="how often the TeensyROM sends, ms (default: 20 on USB "
                     "serial, at once on TCP). Every USB transfer briefly stops the bus interrupt: do not go below 20 on USB")
-    ap.add_argument("--buffer", type=float, default=0.05, help="live: sound card FIFO target, seconds")
+    ap.add_argument("--buffer", type=float, default=0.03, help="live: sound card FIFO target, seconds")
     ap.add_argument("--isr", action="store_true", help="live: print the TeensyROM's late bus-interrupt counts every second "
                     "(firmware 0.9-sn3+): a cartridge game misbehaves when '>250ns' climbs")
     a = ap.parse_args()
@@ -87,8 +87,7 @@ def main():
     if not ok:
         sys.exit(1)
 
-    latency = a.latency if a.latency is not None else (0.25 if a.tcp else 0.06)
-    player = sidplay.LivePlayer(sidplay.SidRenderer(**kw), latency=latency, buffer=a.buffer)
+    player = sidplay.LivePlayer(sidplay.SidRenderer(**kw), latency=a.latency, buffer=a.buffer)
     recorded = []
     stop = threading.Event()
 
@@ -115,7 +114,7 @@ def main():
                 recorded.append(s.copy())
 
         stream = sd.OutputStream(samplerate=a.rate, channels=channels, dtype="int16",
-                                 callback=callback, blocksize=256)
+                                 callback=callback, blocksize=256, latency="low")
     dec = sp.Decoder()
     th = threading.Thread(target=pump, daemon=True)
     th.start()
@@ -131,7 +130,7 @@ def main():
                 if isinstance(f, sp.Status):
                     if a.isr and last_status is not None:
                         secs = max((f.time - last_status.time) / player.r.phi2, 1e-3)
-                        print(f"# late bus interrupts/s: {(f.late - last_status.late) / secs:7.1f}  "
+                        print(f"# latency {player.latency * 1000:4.0f} ms  late bus interrupts/s: {(f.late - last_status.late) / secs:7.1f}  "
                               f">250ns: {(f.late250 - last_status.late250) / secs:6.1f}  "
                               f">1us: {(f.late1000 - last_status.late1000) / secs:6.1f}", flush=True)
                     last_status = f
@@ -150,6 +149,9 @@ def main():
         if stream:
             stream.stop()
         ch.close()
+    if stream is not None:
+        print(f"# sound card output latency {stream.latency * 1000:.0f} ms")
+    print(f"# latency {player.latency * 1000:.0f} ms{' (automatic)' if player.auto else ''}, FIFO {a.buffer * 1000:.0f} ms")
     print(f"# writes late {player.r.late}, underruns {player.underruns}, drift: dropped {player.dropped} "
           f"repeated {player.repeated}, lost frames {dec.lost_frames}")
     if last_status is not None:

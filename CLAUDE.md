@@ -46,6 +46,9 @@ Ms. Pac-Man lasts a minute to several minutes instead of crashing at once, **but
 interrupts. `--send-ms 5` and `200` changed neither the counts nor clearly the crash time. Next: ~10-minute runs with no
 capture and over TCP (TCP runs so far were ~16 s); if only USB crashes, suspect ground/power from the Mac (powered hub or
 USB isolator). Keep USB writes few and large.
+Host only (no SNREV change): `trsid.py` live latency is automatic by default (`LivePlayer`: 99th percentile of frame
+arrival delay over 6 s + 10 ms, 15-500 ms, slewed), FIFO 30 ms, `sounddevice` low latency. The old fixed 250 ms on TCP
+was the lag the owner heard. Not yet on hardware.
 0.9-sn4: snoop's own TCP data port 2113 (`SnoopDataPortService`; the clients try it first, then 2112); host-tested, not
 on hardware. NativeEthernet's `EthernetServer::available()` blocks up to 10 s for a new client's first bytes.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every

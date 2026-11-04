@@ -180,11 +180,23 @@ class LivePlayer:
     the callback takes from it.  The FIFO level is held near `buffer` by dropping or repeating
     one sample at a time (C64 crystal against the sound card's: ~100 ppm, a few samples a second)."""
 
-    def __init__(self, renderer: SidRenderer, latency=0.03, buffer=0.05, now=time.monotonic):
+    AUTO_START = 0.06      # seconds behind the C64 until enough frames have been seen
+    AUTO_MIN, AUTO_MAX = 0.015, 0.5
+    AUTO_MARGIN = 0.010    # above the measured 99th-percentile frame delay
+    AUTO_WINDOW = 6.0      # seconds of frame delays kept
+    AUTO_UP, AUTO_DOWN = 0.05, 0.010   # how fast the latency may move, seconds per second
+
+    def __init__(self, renderer: SidRenderer, latency=None, buffer=0.03, now=time.monotonic):
+        """latency None: automatic, from how late frames arrive (99th percentile of the last
+        AUTO_WINDOW seconds plus AUTO_MARGIN, moved at most AUTO_UP / AUTO_DOWN per second, so the
+        sample-level drift correction absorbs the change)."""
         self.r = renderer
         self.clock = LiveClock(renderer.phi2, now=now)
         self.now = now
-        self.latency = latency
+        self.auto = latency is None
+        self.latency = self.AUTO_START if self.auto else latency
+        self.delays = collections.deque()   # (wall, seconds a frame's oldest write had waited when it arrived)
+        self.last_adjust = None
         self.target = int(buffer * renderer.rate)
         self.fifo = collections.deque()
         self.fifo_len = 0
@@ -206,14 +218,42 @@ class LivePlayer:
                 self.started = False
                 return
             self.r.push(frame)
+            oldest = None
             if isinstance(frame, sp.Writes) and frame.blocks:
                 self.clock.seen(frame.blocks[-1].time)
+                oldest = frame.blocks[0].time
             elif isinstance(frame, sp.Status):
                 self.clock.seen(frame.time)
+                oldest = frame.time
+            if oldest is not None:
+                wall = self.now()
+                now = self.clock.c64_now(wall)
+                self.delays.append((wall, max(0.0, (now - oldest) / self.r.phi2)))
+                while self.delays and wall - self.delays[0][0] > self.AUTO_WINDOW:
+                    self.delays.popleft()
+
+    def _adjust_latency(self):
+        wall = self.now()
+        if self.last_adjust is None:
+            self.last_adjust = wall
+            return
+        dt = wall - self.last_adjust
+        if dt < 0.1 or len(self.delays) < 20:
+            return
+        self.last_adjust = wall
+        d = sorted(x for _, x in self.delays)
+        p99 = d[min(len(d) - 1, int(0.99 * len(d)))]
+        target = min(self.AUTO_MAX, max(self.AUTO_MIN, p99 + self.AUTO_MARGIN))
+        if target > self.latency:
+            self.latency = min(target, self.latency + self.AUTO_UP * dt)
+        else:
+            self.latency = max(target, self.latency - self.AUTO_DOWN * dt)
 
     def pump(self):
         """Render what is due.  Call often (every few ms) from a non-audio thread."""
         with self.lock:
+            if self.auto:
+                self._adjust_latency()
             now = self.clock.c64_now()
             if now is None:
                 return
