@@ -49,6 +49,10 @@ USB isolator). Keep USB writes few and large.
 Host only (no SNREV change): `trsid.py` live latency is automatic by default (`LivePlayer`: 99th percentile of frame
 arrival delay over 6 s + 10 ms, 15-500 ms, slewed), FIFO 30 ms, `sounddevice` low latency. The old fixed 250 ms on TCP
 was the lag the owner heard. Not yet on hardware.
+Host only: `trsid.py --bench` showed a Pi Zero needs 291-463 % of its core (reSIDfp alone 164-187 %), so `native/`
+has `trsid-native` (C++, classic reSID fetched by `native/Makefile` at a fixed commit, not committed): bench, replay,
+live over TCP/serial, ALSA optional. Pi Zero bench (owner): fast sampling 22-29 %, the only usable one; live defaults
+to it. `make test-native` (needs the git fetch). ALSA playback not yet on a real sound card.
 0.9-sn4: snoop's own TCP data port 2113 (`SnoopDataPortService`; the clients try it first, then 2112); host-tested, not
 on hardware. NativeEthernet's `EthernetServer::available()` blocks up to 10 s for a new client's first bytes.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every

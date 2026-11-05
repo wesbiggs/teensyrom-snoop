@@ -17,6 +17,7 @@ pages) can be watched, for example a second SID at `$D500`, the VIC, or a cartri
 | `isrPHI2` cost | same registers saved as stock (checked in the ARM disassembly); a read cycle pays a compare and branch, an unwatched write ~7 instructions |
 | Patch | applies to upstream `6518b966` alone and with teensyrom-vdrive 0.9.0.45 (its HEAD), either order; stock, snoop, vdrive and vdrive + snoop compile for the M7 (`tools/armcheck`) with the same `isrPHI2` saves, and the on-time path is as long as stock's. (Before sn3, `tools/armcheck` silently built the unpatched tree: its earlier results for patched trees were wrong; the CI builds were real.) |
 | Player (`trsid.py`) | renders to WAV; the live path (TCP, real time, `tools/fake_tr.py` as the TeensyROM) matches the offline render (62 dB, no underruns, `make test-live`); not tried on a sound card (the container has none) |
+| Native player (`native/`, `trsid-native`) | for slow computers. Its replay matches `trsid.py` (pitch, length); the live path (TCP and, through a pseudo-terminal, USB serial) matches its offline render (57 dB / bit-identical, no late writes, `tests/live_native.py`). Bench on a Raspberry Pi Zero (owner): fast sampling 22 % of the core (tune) / 29 % (8 kHz digi), interpolate 135-146 %, resample 204-214 %. ALSA playback compiled and run against ALSA's null device only (no sound card here) |
 | End to end with real tunes | three of the TeensyROM's bundled SIDs, played in a 6502 emulator, through the core, the wire and reSIDfp: every write at its exact cycle, audio equal to a direct render |
 | Teensyduino build (GCC 11.3, link, size) | **builds** in CI (`TeensyROM+_0.9_full.hex`; main image RAM1 free for locals 75004, padding 26888). `isrPHI2` saves `{r3-r9, sl, fp, lr}` (already every callee-saved register, so the hook cannot add saves); write cycles branch out to the page-map test; `SnoopTap` stores the entry before `head` |
 | Hardware (owner, 2026-11-03, 0.9-sn1) | **works** over TCP and USB serial. TCP over a multi-hop WiFi link gave many late writes at the old 30 ms latency (now 250 ms by default on TCP). USB serial gave ~0 late writes but glitched or crashed cartridge games (Ms. Pac-Man): every USB transfer runs with interrupts off. 0.9-sn2 batches USB sends (20 ms): **Ms. Pac-Man still misbehaves on USB** (owner). 0.9-sn3 on hardware (owner, 2026-11-03): **TCP much better** (late writes in a 30-45 s clip down from thousands, 8000 on one run, to 538, no audible drops). Ms. Pac-Man on USB still crashes; `--isr` over 16 s showed no missed cycles (`>1us` 0), 12 interrupts >250 ns late (8 of them in the second it crashed) and ~265/s small (<250 ns) lateness, ~1500/s during the launch. Next: the same over TCP, the USB cable with no capture, and a capture of an unwritten address |
@@ -42,6 +43,7 @@ pages) can be watched, for example a second SID at `$D500`, the VIC, or a cartri
   * `snoopproto.py`: the decoder and encoder, with no dependencies.
   * `trsnoop.py`: prints or records a stream.
   * `sidplay.py` + `trsid.py`: the reSIDfp player.
+* `native/`: `trsid-native`, the same player in C++ on classic reSID, for computers too slow for `trsid.py`.
 * `tools/`:
   * `make_tr_patch.py` regenerates the patch.
   * `sidtrace.py` turns a PSID into the write stream the TeensyROM would capture, with no hardware.
@@ -74,6 +76,26 @@ On a slow computer (a Raspberry Pi Zero), `--bench` times the player on a synthe
 and prints the share of one core it needs, split into reSIDfp and Python; aim for 70 % or less. `--sampling fast`
 (reSIDfp's decimation instead of its sinc resampler), `--model 8580` and `--no-filter` are cheaper.
 On a 2.1 GHz Xeon core: 7 % (tune) and 10 % (digi), 6581 with filter and resampling.
+A Raspberry Pi Zero needs 291 % and 463 %: use the native player there.
+
+### The native player (Raspberry Pi Zero)
+
+`trsid-native` is the player in C++ on classic reSID 1.0 (the libsidplayfp maintained copy), with the same
+command line as `trsid.py`. Its fast sampling (reSID's nearest sample, no resampling filter, slight aliasing)
+is what a Pi Zero keeps up with: 22-29 % of its core. Live play uses it by default; a replay to WAV uses
+interpolate, which is better and 5× dearer.
+
+```
+sudo apt install g++ git perl libasound2-dev       # libasound2-dev only for playing (else it records only)
+make -C native                                      # fetches reSID at a fixed commit into build/, builds
+build/native/trsid-native --bench                   # the share of one core, all three sampling methods
+build/native/trsid-native --tcp 192.168.1.50                                      # play live (ALSA)
+build/native/trsid-native --tcp 192.168.1.50 --no-play --wav x.wav --seconds 60   # record, no sound card
+build/native/trsid-native --replay x.snoop --wav x.wav                            # a recording to WAV
+```
+
+`--device` picks the ALSA device (`aplay -L` lists them). `tests/live_native.py` checks the live path against
+`tools/fake_tr.py`.
 
 `trsnoop.py` prints one line per block (C64 cycles, seconds, address, bytes) plus HELLO/STATUS/BYE lines.
 
@@ -203,6 +225,7 @@ the registers `isrPHI2` saves (see the script for the repositories it needs).
    writes), a C128's `$00/$01` writes during the DMA HIRAM sense, and the REU's `$FF00` trigger.
    These are the cycles where the earlier snoops end the ISR.
 9. **The player uses reSIDfp through pyresidfp (GPL-2.0+)** as a run-time dependency, not shipped.
+   `native/Makefile` fetches reSID (GPL-2.0+) at a fixed commit at build time; it is not in the repository.
    The model defaults to 6581 because the stream does not say which chip (the C64 has none).
 10. **No licence file yet:** that is the owner's call. The TeensyROM is MIT, and the patch adds files under it.
 

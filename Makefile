@@ -50,7 +50,15 @@ demo: build/libsnoop.so
 	  $(PYTHON) tools/sidtrace.py $(TEENSYROM)/Source/Teensy/TRMenuFiles/SIDs/$$t.sid.h --seconds 30 --gap 0 --snoop build/demo/$$t.snoop && \
 	  $(PYTHON) host/trsid.py --replay build/demo/$$t.snoop --wav build/demo/$$t.wav; done
 
+# the C++ player on classic reSID (fetches reSID with git), and its live path against tools/fake_tr.py
+native:
+	$(MAKE) -C native
+
+test-native: native
+	$(PYTHON) tests/live_native.py
+	$(PYTHON) tests/live_native.py --sampling interpolate --stereo --sid D400 --sid D420
+
 clean:
 	rm -rf build
 
-.PHONY: all check-cxx test-core test-fw test-player test-e2e test test-live demo clean
+.PHONY: native test-native all check-cxx test-core test-fw test-player test-e2e test test-live demo clean

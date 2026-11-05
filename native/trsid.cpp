@@ -1,16 +1,23 @@
 // trsid-native: the teensyrom-snoop SID player in C++ on classic reSID, for computers too slow for
 // host/trsid.py (a Raspberry Pi Zero: reSIDfp alone needs more than its one core).
 //
-//   trsid-native --bench                         time the player on a synthetic tune and an 8 kHz digi
-//   trsid-native --bench --replay sid.snoop      ...or on a recording (host/trsnoop.py --raw)
-//   trsid-native --replay sid.snoop --wav x.wav  a recording to WAV
+//   trsid-native --tcp 192.168.1.50                   play live (ALSA)
+//   trsid-native --tcp 192.168.1.50 --no-play --wav x.wav --seconds 60    record live, no sound card
+//   trsid-native --port /dev/ttyACM0 --wav x.wav      play and record, over USB serial
+//   trsid-native --bench                              time the player on a synthetic tune and an 8 kHz digi
+//   trsid-native --bench --replay sid.snoop           ...or on a recording (host/trsnoop.py --raw)
+//   trsid-native --replay sid.snoop --wav x.wav       a recording to WAV
 //
-// Options: --model 6581|8580, --sampling fast|interpolate|resample, --no-filter, --rate HZ,
-// --sid HEX (repeat), --stereo, --seconds S (synthetic bench length).
-// The wire format is docs/PROTOCOL.md; the rendering follows host/sidplay.py (SidRenderer).
+// The wire format is docs/PROTOCOL.md; rendering and live timing follow host/sidplay.py (SidRenderer,
+// LiveClock, LivePlayer) and the command line follows host/trsid.py.  Live play defaults to reSID's
+// fast sampling (the only one a Raspberry Pi Zero keeps up with), a recording to interpolate.
 // reSID (GPL-2.0-or-later) is fetched and compiled by native/Makefile.
 
 #include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -18,8 +25,23 @@
 #include <ctime>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include <fcntl.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <termios.h>
+#include <unistd.h>
+
+#if HAVE_ALSA
+#include <alsa/asoundlib.h>
+#endif
 
 #include "sid.h"
 
@@ -464,7 +486,7 @@ void bench(const char* name, const std::vector<uint8_t>& data, const Options& o)
     }
     double t_emu = cpu_seconds() - t0;
     double c64 = (double)end / r.phi2;
-    printf("%s: %.1f s of C64 time, %.0f writes/s: %.0f%% of one core (reSID alone %.0f%%)\n", name, c64,
+    printf("%s: %.1f s of C64 time, %.0f writes/s: %.0f%% of one core (reSID, silent: %.0f%%)\n", name, c64,
            writes / c64, 100 * t_play / c64, 100 * t_emu / c64);
     fflush(stdout);
 }
@@ -536,11 +558,468 @@ void replay(const std::vector<uint8_t>& data, const Options& o, const char* wav)
     }
 }
 
+// ---- live play -----------------------------------------------------------------------------------
+
+double wall_seconds() {
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+// Where "now" is on the C64's timeline.  Each frame says the TeensyROM had reached at least its time
+// when it was sent, so time/phi2 - arrival is at most the true offset of the two clocks: keep the
+// largest of the last `window` seconds (least transport delay) and extrapolate with the nominal phi2.
+struct LiveClock {
+    double phi2;
+    double window = 4.0;
+    std::deque<std::pair<double, double>> marks;    // (wall, offset seconds); marks[0] is the best
+
+    explicit LiveClock(double hz) : phi2(hz) {}
+
+    void seen(uint64_t c64, double wall) {
+        double off = c64 / phi2 - wall;
+        while (!marks.empty() && marks.back().second <= off) marks.pop_back();
+        marks.push_back({wall, off});
+        trim(wall);
+    }
+
+    void trim(double wall) {
+        while (marks.size() > 1 && wall - marks.front().first > window) marks.pop_front();
+    }
+
+    bool now(double wall, int64_t& c64) {
+        if (marks.empty()) return false;
+        trim(wall);
+        c64 = (int64_t)((marks.front().second + wall) * phi2);
+        return true;
+    }
+};
+
+// Renderer + clock + a sample FIFO with slow drift correction.  feed() from the network thread,
+// pump() from the render thread, fill() from the audio thread (or drain() when only recording).
+class LivePlayer {
+public:
+    const double AUTO_START = 0.06, AUTO_MIN = 0.015, AUTO_MAX = 0.5, AUTO_MARGIN = 0.010;
+    const double AUTO_WINDOW = 6.0, AUTO_UP = 0.05, AUTO_DOWN = 0.010;
+
+    LivePlayer(const Options& o, double latency, double buffer)
+        : r(o), clock(PHI2_PAL), auto_latency(latency < 0), latency(latency < 0 ? AUTO_START : latency),
+          channels(o.stereo ? 2 : 1), target((size_t)(buffer * o.rate)), last(2, 0) {}
+
+    void feed(const Frame& f) {
+        std::lock_guard<std::mutex> g(lock);
+        double wall = wall_seconds();
+        if (f.type == F_HELLO) {
+            r.push(f);
+            clock = LiveClock(f.phi2);
+            clock.seen(0, wall);
+            fifo.clear();
+            started = false;
+            return;
+        }
+        r.push(f);
+        uint64_t oldest;
+        if (f.type == F_WRITES && !f.blocks.empty()) {
+            clock.seen(f.blocks.back().time, wall);
+            oldest = f.blocks.front().time;
+        } else if (f.type == F_STATUS) {
+            clock.seen(f.time, wall);
+            oldest = f.time;
+        } else {
+            return;
+        }
+        int64_t now = 0;
+        clock.now(wall, now);
+        delays.push_back({wall, std::max(0.0, (now - (double)oldest) / r.phi2)});
+        while (!delays.empty() && wall - delays.front().first > AUTO_WINDOW) delays.pop_front();
+    }
+
+    // Render what is due.  Call every few ms.
+    void pump() {
+        std::lock_guard<std::mutex> g(lock);
+        double wall = wall_seconds();
+        if (auto_latency) adjust_latency(wall);
+        int64_t now;
+        if (!clock.now(wall, now)) return;
+        int64_t t = now - (int64_t)(latency * r.phi2);
+        if (t <= (int64_t)r.cursor) return;
+        if ((t - (int64_t)r.cursor) > (int64_t)r.phi2) {      // a stall (or the start): jump, keep the state right
+            scratch.clear();
+            r.render_to(t - r.phi2 / 5, scratch);
+        }
+        size_t before = fifo.size();
+        r.render_to(t, fifo);
+        if (fifo.size() > before && fifo.size() / channels >= target) started = true;
+    }
+
+    // n frames for the sound card, interleaved.  Holds the FIFO near `buffer` by taking one frame more
+    // or less per call (the C64's crystal against the sound card's: ~100 ppm).
+    void fill(int16_t* out, size_t n) {
+        std::lock_guard<std::mutex> g(lock);
+        if (!started) {
+            std::fill(out, out + n * channels, 0);
+            return;
+        }
+        size_t have = fifo.size() / channels;
+        size_t want = n;
+        if (have > target * 5 / 4) {
+            want = n + 1;
+            dropped++;
+        } else if (have < target * 3 / 4) {
+            want = n - 1;
+            repeated++;
+        }
+        size_t got = std::min(want, have);
+        if (got < want) underruns++;
+        size_t skip = (want == n + 1 && got == want) ? 1 : 0;
+        size_t use = std::min(n, got - skip);
+        std::copy(fifo.begin() + skip * channels, fifo.begin() + (skip + use) * channels, out);
+        fifo.erase(fifo.begin(), fifo.begin() + got * channels);
+        if (use) std::copy(out + (use - 1) * channels, out + use * channels, last.begin());
+        for (size_t k = use; k < n; k++) std::copy(last.begin(), last.begin() + channels, out + k * channels);
+    }
+
+    // Everything rendered so far, no drift correction (recording without a sound card).
+    void drain(std::vector<int16_t>& out) {
+        std::lock_guard<std::mutex> g(lock);
+        out.insert(out.end(), fifo.begin(), fifo.end());
+        fifo.clear();
+    }
+
+    Renderer r;
+    LiveClock clock;
+    bool auto_latency;
+    double latency;
+    uint32_t underruns = 0, dropped = 0, repeated = 0;
+    std::mutex lock;
+
+private:
+    void adjust_latency(double wall) {
+        if (last_adjust < 0) {
+            last_adjust = wall;
+            return;
+        }
+        double dt = wall - last_adjust;
+        if (dt < 0.1 || delays.size() < 20) return;
+        last_adjust = wall;
+        std::vector<double> d;
+        for (auto& x : delays) d.push_back(x.second);
+        size_t k = std::min(d.size() - 1, (size_t)(0.99 * d.size()));
+        std::nth_element(d.begin(), d.begin() + k, d.end());
+        double goal = std::min(AUTO_MAX, std::max(AUTO_MIN, d[k] + AUTO_MARGIN));
+        if (goal > latency) latency = std::min(goal, latency + AUTO_UP * dt);
+        else latency = std::max(goal, latency - AUTO_DOWN * dt);
+    }
+
+    size_t channels, target;
+    std::vector<int16_t> fifo, scratch, last;
+    std::deque<std::pair<double, double>> delays;   // (wall, seconds a frame's oldest write had waited)
+    double last_adjust = -1;
+    bool started = false;
+};
+
+// The TeensyROM's channel: TCP (the snoop data port 2113, else 2112) or USB serial.
+struct Channel {
+    int fd = -1;
+
+    bool open_tcp(const char* host, int port) {
+        int ports[2] = {port ? port : 2113, port ? 0 : 2112};
+        for (int p : ports) {
+            if (!p) break;
+            addrinfo hints = {}, *res = nullptr;
+            hints.ai_family = AF_UNSPEC;
+            hints.ai_socktype = SOCK_STREAM;
+            char ps[8];
+            snprintf(ps, sizeof ps, "%d", p);
+            if (getaddrinfo(host, ps, &hints, &res) != 0) {
+                fprintf(stderr, "cannot resolve %s\n", host);
+                return false;
+            }
+            int err = 0;
+            for (addrinfo* a = res; a; a = a->ai_next) {
+                fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+                if (fd >= 0 && connect(fd, a->ai_addr, a->ai_addrlen) == 0) break;
+                err = errno;
+                if (fd >= 0) close(fd);
+                fd = -1;
+            }
+            freeaddrinfo(res);
+            if (fd >= 0) {
+                int one = 1;
+                setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+                return true;
+            }
+            if (p == 2113 && err == ECONNREFUSED && !port) {
+                fprintf(stderr, "# port 2113 refused (firmware before 0.9-sn4?): using 2112, which other tools "
+                                "then cannot use during the capture\n");
+                continue;
+            }
+            fprintf(stderr, "cannot connect to %s:%d: %s\n", host, p, strerror(err));
+            return false;
+        }
+        return false;
+    }
+
+    bool open_serial(const char* path) {
+        fd = open(path, O_RDWR | O_NOCTTY);
+        if (fd < 0) {
+            fprintf(stderr, "cannot open %s: %s\n", path, strerror(errno));
+            return false;
+        }
+        termios t;
+        if (tcgetattr(fd, &t) == 0) {
+            cfmakeraw(&t);
+            cfsetispeed(&t, B115200);                // USB CDC ignores it
+            cfsetospeed(&t, B115200);
+            t.c_cflag |= CLOCAL | CREAD;
+            tcsetattr(fd, TCSANOW, &t);
+        }
+        return true;
+    }
+
+    bool write_all(const std::vector<uint8_t>& b) {
+        size_t off = 0;
+        while (off < b.size()) {
+            ssize_t n = ::write(fd, b.data() + off, b.size() - off);
+            if (n <= 0) return false;
+            off += n;
+        }
+        return true;
+    }
+
+    // Up to n bytes; 0 after timeout_ms with nothing; -1 when the channel is gone.
+    ssize_t read_some(uint8_t* buf, size_t n, int timeout_ms) {
+        pollfd p = {fd, POLLIN, 0};
+        int k = poll(&p, 1, timeout_ms);
+        if (k < 0) return errno == EINTR ? 0 : -1;
+        if (k == 0) return 0;
+        ssize_t got = ::read(fd, buf, n);
+        return got > 0 ? got : -1;
+    }
+};
+
+std::vector<uint8_t> start_command(const std::vector<uint16_t>& bases, int send_ms) {
+    std::vector<uint8_t> c = {0x64, 0x53, 0x01, (uint8_t)bases.size()};
+    for (uint16_t b : bases) {
+        put_le(c, b, 2);
+        put_le(c, b + 0x1C, 2);
+    }
+    c.push_back(0);                                 // gap 0: every write its own exact time
+    c.push_back((uint8_t)send_ms);
+    return c;
+}
+
+// Read until AckToken (CC 64) or FailToken (7F 9B).  rest: what followed the Ack (the stream's start).
+bool wait_ack(Channel& ch, std::vector<uint8_t>& rest) {
+    std::vector<uint8_t> buf;
+    double end = wall_seconds() + 3.0;
+    uint8_t tmp[4096];
+    while (wall_seconds() < end) {
+        ssize_t n = ch.read_some(tmp, sizeof tmp, 100);
+        if (n < 0) break;
+        buf.insert(buf.end(), tmp, tmp + n);
+        for (size_t i = 0; i + 1 < buf.size(); i++) {
+            if (buf[i] == 0xCC && buf[i + 1] == 0x64) {
+                rest.assign(buf.begin() + i + 2, buf.end());
+                return true;
+            }
+            if (buf[i] == 0x7F && buf[i + 1] == 0x9B) {
+                n = ch.read_some(tmp, sizeof tmp, 200);
+                if (n > 0) buf.insert(buf.end(), tmp, tmp + n);
+                std::string msg(buf.begin() + i + 2, buf.end());
+                fprintf(stderr, "TeensyROM refused: %s\n", msg.c_str());
+                return false;
+            }
+        }
+    }
+    fprintf(stderr, "no answer from the TeensyROM (firmware without teensyrom-snoop?)\n");
+    return false;
+}
+
+std::atomic<bool> g_stop(false);
+
+void on_signal(int) { g_stop = true; }
+
+struct LiveArgs {
+    const char* tcp = nullptr;
+    const char* serial = nullptr;
+    int tcp_port = 0;
+    int send_ms = 0;
+    double latency = -1;                            // < 0: automatic
+    double buffer = 0.03;
+    double seconds = 0;
+    bool play = true;
+    bool isr = false;
+    const char* wav = nullptr;
+    const char* device = "default";
+};
+
+#if HAVE_ALSA
+snd_pcm_t* open_alsa(const LiveArgs& a, const Options& o) {
+    snd_pcm_t* pcm = nullptr;
+    int err = snd_pcm_open(&pcm, a.device, SND_PCM_STREAM_PLAYBACK, 0);
+    if (err < 0) {
+        fprintf(stderr, "cannot open sound device %s: %s (record only: --no-play --wav)\n", a.device, snd_strerror(err));
+        return nullptr;
+    }
+    err = snd_pcm_set_params(pcm, SND_PCM_FORMAT_S16, SND_PCM_ACCESS_RW_INTERLEAVED, o.stereo ? 2 : 1, o.rate, 1,
+                             40000);           // 40 ms of sound card buffer
+    if (err < 0) {
+        fprintf(stderr, "sound device %s: %s\n", a.device, snd_strerror(err));
+        snd_pcm_close(pcm);
+        return nullptr;
+    }
+    return pcm;
+}
+#endif
+
+int live(const LiveArgs& a, const Options& o) {
+    Channel ch;
+    if (a.tcp ? !ch.open_tcp(a.tcp, a.tcp_port) : !ch.open_serial(a.serial)) return 1;
+#if HAVE_ALSA
+    snd_pcm_t* pcm = nullptr;
+    if (a.play && !(pcm = open_alsa(a, o))) return 1;
+#else
+    if (a.play) {
+        fprintf(stderr, "built without ALSA (install libasound2-dev and rebuild): record with --no-play --wav\n");
+        return 1;
+    }
+#endif
+    if (!ch.write_all(start_command(o.bases, a.send_ms))) {
+        fprintf(stderr, "cannot send the start command\n");
+        return 1;
+    }
+    std::vector<uint8_t> rest;
+    if (!wait_ack(ch, rest)) return 1;
+
+    signal(SIGINT, on_signal);
+    signal(SIGTERM, on_signal);
+    signal(SIGPIPE, SIG_IGN);
+    LivePlayer player(o, a.latency, a.buffer);
+    int channels = o.stereo ? 2 : 1;
+    std::vector<int16_t> recorded;
+    std::mutex rec_lock;
+    std::atomic<bool> stop_threads(false);
+
+    std::thread pump([&]() {
+        while (!stop_threads) {
+            player.pump();
+            if (!a.play && a.wav) {
+                std::lock_guard<std::mutex> g(rec_lock);
+                player.drain(recorded);
+            } else if (!a.play) {
+                std::vector<int16_t> sink;
+                player.drain(sink);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(4));
+        }
+    });
+#if HAVE_ALSA
+    std::thread audio;
+    if (pcm) {
+        audio = std::thread([&]() {
+            std::vector<int16_t> buf(256 * channels);
+            while (!stop_threads) {
+                player.fill(buf.data(), 256);
+                if (a.wav) {
+                    std::lock_guard<std::mutex> g(rec_lock);
+                    recorded.insert(recorded.end(), buf.begin(), buf.end());
+                }
+                snd_pcm_sframes_t n = snd_pcm_writei(pcm, buf.data(), 256);
+                if (n < 0 && snd_pcm_recover(pcm, (int)n, 1) < 0) {
+                    fprintf(stderr, "sound device: %s\n", snd_strerror((int)n));
+                    break;
+                }
+            }
+        });
+    }
+#endif
+
+    Decoder dec;
+    Frame last_status;
+    bool have_status = false;
+    uint32_t lost = 0;
+    int next_seq = -1;
+    double end = a.seconds > 0 ? wall_seconds() + a.seconds : 0;
+    bool bye = false;
+    auto on_frame = [&](const Frame& f) {
+        if (f.type == F_HELLO) next_seq = 0;
+        if (f.type == F_WRITES && next_seq >= 0) {
+            lost += (uint16_t)(f.seq - next_seq);
+            next_seq = (uint16_t)(f.seq + 1);
+        }
+        player.feed(f);
+        if (f.type == F_STATUS) {
+            if (a.isr && have_status) {
+                double secs = std::max((double)(f.time - last_status.time) / player.r.phi2, 1e-3);
+                printf("# latency %4.0f ms  late bus interrupts/s: %7.1f  >250ns: %6.1f  >1us: %6.1f\n",
+                       player.latency * 1000, (f.late - last_status.late) / secs,
+                       (f.late250 - last_status.late250) / secs, (f.late1000 - last_status.late1000) / secs);
+                fflush(stdout);
+            }
+            last_status = f;
+            have_status = true;
+        }
+        if (f.type == F_BYE) bye = true;
+    };
+    dec.feed(rest.data(), rest.size(), on_frame);
+    uint8_t buf[4096];
+    while (!g_stop && !bye && !(end && wall_seconds() > end)) {
+        ssize_t n = ch.read_some(buf, sizeof buf, 200);
+        if (n < 0) {
+            fprintf(stderr, "# the TeensyROM closed the connection\n");
+            break;
+        }
+        dec.feed(buf, (size_t)n, on_frame);
+    }
+    ch.write_all({0x64, 0x53, 0x00});              // stop
+    stop_threads = true;
+    pump.join();
+#if HAVE_ALSA
+    if (audio.joinable()) audio.join();
+    if (pcm) {
+        snd_pcm_drop(pcm);
+        snd_pcm_close(pcm);
+    }
+#endif
+    close(ch.fd);
+
+    printf("# latency %.0f ms%s, FIFO %.0f ms, sampling %s\n", player.latency * 1000,
+           player.auto_latency ? " (automatic)" : "", a.buffer * 1000, sampling_name(o.sampling));
+    printf("# writes late %u, underruns %u, drift: dropped %u repeated %u, lost frames %u, bad frames %u\n",
+           player.r.late, player.underruns, player.dropped, player.repeated, lost, dec.bad_frames);
+    if (have_status) {
+        double secs = std::max((double)last_status.time / player.r.phi2, 1e-3);
+        printf("# late bus interrupts in %.0f s: %u (>250ns %u, >1us %u)\n", secs, last_status.late,
+               last_status.late250, last_status.late1000);
+    }
+    if (a.wav && !recorded.empty()) {
+        if (!write_wav(a.wav, recorded, o.rate, channels)) {
+            fprintf(stderr, "cannot write %s\n", a.wav);
+            return 1;
+        }
+        printf("# wrote %s\n", a.wav);
+    }
+    return 0;
+}
+
 void usage() {
-    fputs("usage: trsid-native --bench [--replay FILE] | --replay FILE --wav OUT.wav\n"
-          "  [--model 6581|8580] [--sampling fast|interpolate|resample] [--no-filter] [--rate HZ]\n"
-          "  [--sid HEX ...] [--stereo] [--seconds S]\n"
-          "--bench with no --sampling times all three sampling methods.\n", stderr);
+    fputs("usage: trsid-native --tcp HOST | --port TTY | --replay FILE | --bench   [options]\n"
+          "  --tcp HOST          the TeensyROM's address (port 2113, else 2112); --tcp-port N to choose\n"
+          "  --port TTY          its USB serial port (/dev/ttyACM0)\n"
+          "  --replay FILE       a recording (host/trsnoop.py --raw): to --wav, or timed with --bench\n"
+          "  --bench             time the player: a synthetic tune and an 8 kHz digi (or --replay FILE)\n"
+          "  --wav OUT.wav       record what is played\n"
+          "  --no-play           live: no sound card (with --wav: record only)\n"
+          "  --device NAME       ALSA device (default: default)\n"
+          "  --seconds S         live: stop after S seconds; bench: the synthetic streams' length (10)\n"
+          "  --latency S         live: seconds behind the C64, fixed (default: automatic)\n"
+          "  --buffer S          live: FIFO target, seconds (0.03)\n"
+          "  --send-ms N         how often the TeensyROM sends (default 20 on USB serial, at once on TCP)\n"
+          "  --isr               live: the TeensyROM's late bus-interrupt counts every second\n"
+          "  --model 6581|8580  --no-filter  --rate HZ (48000)  --sid HEX (repeat; D400)  --stereo\n"
+          "  --sampling fast|interpolate|resample   (live: fast; replay: interpolate; bench: all three)\n",
+          stderr);
     exit(2);
 }
 
@@ -548,10 +1027,10 @@ void usage() {
 
 int main(int argc, char** argv) {
     Options o;
+    LiveArgs la;
     bool do_bench = false, sampling_set = false;
     const char* replay_path = nullptr;
-    const char* wav = nullptr;
-    double seconds = 10.0;
+    double seconds = 0;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto val = [&]() -> const char* {
@@ -560,7 +1039,16 @@ int main(int argc, char** argv) {
         };
         if (a == "--bench") do_bench = true;
         else if (a == "--replay") replay_path = val();
-        else if (a == "--wav") wav = val();
+        else if (a == "--tcp") la.tcp = val();
+        else if (a == "--port") la.serial = val();
+        else if (a == "--tcp-port") la.tcp_port = atoi(val());
+        else if (a == "--send-ms") la.send_ms = atoi(val());
+        else if (a == "--latency") la.latency = atof(val());
+        else if (a == "--buffer") la.buffer = atof(val());
+        else if (a == "--no-play") la.play = false;
+        else if (a == "--isr") la.isr = true;
+        else if (a == "--device") la.device = val();
+        else if (a == "--wav") la.wav = val();
         else if (a == "--seconds") seconds = atof(val());
         else if (a == "--rate") o.rate = atoi(val());
         else if (a == "--stereo") o.stereo = true;
@@ -585,23 +1073,30 @@ int main(int argc, char** argv) {
         }
     }
     if (o.bases.empty()) o.bases.push_back(0xD400);
-    if (!do_bench && !replay_path) usage();
+    if ((la.tcp != nullptr) + (la.serial != nullptr) + (replay_path != nullptr && !do_bench) + do_bench != 1) usage();
 
+    if (la.tcp || la.serial) {
+        if (!sampling_set) o.sampling = reSID::SAMPLE_FAST;
+        la.seconds = seconds;
+        if (!la.play && !la.wav) fprintf(stderr, "# --no-play without --wav: nothing is kept\n");
+        return live(la, o);
+    }
     std::vector<uint8_t> data;
     if (replay_path && !read_file(replay_path, data)) {
         fprintf(stderr, "cannot read %s\n", replay_path);
         return 1;
     }
     if (!do_bench) {
-        replay(data, o, wav);
+        replay(data, o, la.wav);
         return 0;
     }
     std::vector<std::pair<std::string, std::vector<uint8_t>>> runs;
     if (replay_path) {
         runs.push_back({replay_path, data});
     } else {
-        runs.push_back({"tune (~1250 writes/s)", bench_stream(seconds, 0, o.bases[0], PHI2_PAL)});
-        runs.push_back({"digi 8 kHz (~9250 writes/s)", bench_stream(seconds, 8000, o.bases[0], PHI2_PAL)});
+        double s = seconds > 0 ? seconds : 10.0;
+        runs.push_back({"tune (~1250 writes/s)", bench_stream(s, 0, o.bases[0], PHI2_PAL)});
+        runs.push_back({"digi 8 kHz (~9250 writes/s)", bench_stream(s, 8000, o.bases[0], PHI2_PAL)});
     }
     std::vector<reSID::sampling_method> methods;
     if (sampling_set) methods.push_back(o.sampling);
