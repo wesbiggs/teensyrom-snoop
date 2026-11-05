@@ -1,4 +1,4 @@
-# teensyrom-snoop protocol (version 3)
+# teensyrom-snoop protocol (version 4)
 
 All multi-byte numbers are little-endian unless marked otherwise. `varint` is unsigned LEB128
 (7 bits per byte, low group first, high bit = more).
@@ -81,9 +81,11 @@ STATUS/BYE, so latency is a few ms.
 
 ### STATUS `03`
 
-`03 next_seq:u16 time:varint dropped:u32 out_dropped:u32 ring_hiwater:u16 writes:u32 late:u32 late250:u32 late1000:u32`
+`03 next_seq:u16 time:varint dropped:u32 out_dropped:u32 ring_hiwater:u16 writes:u32 late:u32 late250:u32 late1000:u32 irq_permille:u16 irq_max_permille:u16 loop_passes:u32 loop_max_us:u32`
 
-The three `late` counters are new in version 3. A version 2 STATUS ends after `writes`, and the decoder accepts both.
+The three `late` counters are new in version 3, the last four in version 4 (firmware 0.9-sn5). A version 2 STATUS
+ends after `writes`, a version 3 one after `late1000`; the decoders accept all three. Only the STATUS frame changed
+in version 4.
 
 Once a second, on the status command, and before BYE.
 
@@ -97,6 +99,13 @@ Once a second, on the status command, and before BYE.
   `nS_MaxAdj` after the previous one), more than ~250 ns (a cartridge ROM read answered then can be wrong),
   and more than ~1 us (a bus cycle missed). This is a diagnostic of what else holds the bus interrupt up. It is
   counted in isrPHI2's existing late branch, so on-time cycles pay nothing.
+* `irq_permille`, `irq_max_permille`: the share of the CPU that interrupts took from the main loop since the last
+  STATUS, average and worst sample, in 0.1 %; 0xFFFF when nothing was sampled. Every 100 ms the main loop spins
+  for 0.5 ms reading the CPU cycle counter, and a gap between two reads longer than the loop's own is time an
+  interrupt took (isrPHI2 above all; every interrupt counts). It answers how much CPU an emulator running in the
+  main loop could have (docs/USB-AUDIO.md). The ISR is not touched.
+* `loop_passes`, `loop_max_us`: main-loop passes since the last STATUS (calls of the snoop service), and the longest
+  time between two of them, in us: how long the main loop can be away, which an emulator in it must buffer for.
 
 ### BYE `04`
 

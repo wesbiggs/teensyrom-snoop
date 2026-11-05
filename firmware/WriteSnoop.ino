@@ -38,6 +38,33 @@ EthernetServer SnoopServer(SnoopDataPort);
 EthernetClient SnoopClient;
 #endif
 
+// CPU left to the main loop (0.9-sn5, STATUS version 4): how much an emulator running in loop() could have.
+// Every SnoopLoadEveryMs during a capture, spin SnoopLoadWindowUs reading the cycle counter; a gap between two
+// reads longer than the loop's own (the shortest seen, plus SnoopLoadGap) is time an interrupt took (isrPHI2
+// above all, but every interrupt counts).  The ISR is not touched.  Costs 0.5% of the loop's time.
+#define SnoopLoadEveryMs   100
+#define SnoopLoadWindowUs  500
+#define SnoopLoadGap       24      // CPU cycles: an interrupt's entry and exit alone take more
+#ifndef SnoopCycCnt
+#define SnoopCycCnt() ARM_DWT_CYCCNT
+#endif
+uint32_t SnoopLoadLastMs = 0;
+
+FLASHMEM void SnoopMeasureLoad()
+{
+   const uint32_t Window = (uint32_t)(F_CPU_ACTUAL / 1000000u) * SnoopLoadWindowUs;
+   const uint32_t Start = SnoopCycCnt();
+   uint32_t Prev = Start, Now, Irq = 0, Base = 0xFFFFFFFF;
+   while ((Now = SnoopCycCnt()) - Start < Window)
+   {
+      const uint32_t d = Now - Prev;
+      if (d < Base) Base = d;
+      if (d > Base + SnoopLoadGap) Irq += d - Base;
+      Prev = Now;
+   }
+   snoop_load_sample(&SnoopState, Now - Start, Irq);
+}
+
 FLASHMEM void SnoopSetup()
 {
    if (SnoopReady) return;
@@ -220,6 +247,11 @@ FLASHMEM void SnoopService()
    }
    snoop_poll(&SnoopState, micros(), ARM_DWT_CYCCNT);
    const uint32_t Now = millis();
+   if (Now - SnoopLoadLastMs >= SnoopLoadEveryMs)
+   {
+      SnoopLoadLastMs = Now;
+      SnoopMeasureLoad();
+   }
    const uint32_t Avail = snoop_out_avail(&SnoopState);
    bool Due = Avail && (Avail >= SnoopBatchBytes || Now - SnoopLastSendMs >= SnoopSendEveryMs);
 #ifdef FeatTCPListen

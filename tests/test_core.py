@@ -268,6 +268,40 @@ class LateIsr(unittest.TestCase):
         self.assertEqual(s2.of(sp.Status)[-1].late, 0)
 
 
+class LoopLoad(unittest.TestCase):
+    """STATUS version 4: the CPU share interrupts take from the main loop, and the loop's passes."""
+
+    def test_load_and_loop_passes(self):
+        LIB.sim_load.argtypes = [U32, U32]
+        s = Sim([(0xD418, 0xD418)])
+        for step in (100, 250, 3000, 100):                # snoop_poll calls: the start's poll, then these gaps
+            s.poll(10, us_step=step)
+        LIB.sim_load(300_000, 150_000)                    # 50 %
+        LIB.sim_load(300_000, 240_000)                    # 80 %
+        LIB.sim_load(300_000, 400_000)                    # more than the window: clamped to 100 %
+        LIB.sim_status()
+        s.drain()
+        st = s.of(sp.Status)[-1]
+        self.assertEqual((st.irq_permille, st.irq_max_permille), (766, 1000))
+        self.assertEqual((st.loop_passes, st.loop_max_us), (4, 3000))
+        # reset by each STATUS: nothing sampled since
+        s.poll(20, us_step=50)
+        LIB.sim_status()
+        s.drain()
+        st = s.of(sp.Status)[-1]
+        self.assertEqual((st.irq_permille, st.irq_max_permille, st.loop_passes, st.loop_max_us), (None, None, 1, 50))
+
+    def test_reset_by_start(self):
+        LIB.sim_load.argtypes = [U32, U32]
+        s = Sim([(0xD418, 0xD418)])
+        LIB.sim_load(1000, 500)
+        s.stop(10)
+        s2 = Sim([(0xD418, 0xD418)])
+        s2.stop(10)
+        st = s2.of(sp.Status)[-1]
+        self.assertEqual((st.irq_permille, st.loop_passes), (None, 1))
+
+
 class Limits(unittest.TestCase):
     def test_ring_full_counts_drops(self):
         s = Sim([(0xD418, 0xD418)], gap=0)

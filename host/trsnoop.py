@@ -112,6 +112,8 @@ class Printer:
         elif isinstance(f, sp.Status):
             print(f"# status t={f.time} writes={f.writes} dropped={f.dropped} out_dropped={f.out_dropped} "
                   f"ring_hiwater={f.ring_hiwater} late_isr={f.late} >250ns={f.late250} >1us={f.late1000}")
+            if f.loop_passes is not None:
+                print(f"#        {sp.load_text(f)}")
         elif isinstance(f, sp.Bye):
             print(f"# bye ({f.reason_text})")
         sys.stdout.flush()

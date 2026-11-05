@@ -179,7 +179,7 @@ SNOOP_COLD void snoop_init(snoop_t *s, snoop_hot_t *hot)
 
 SNOOP_COLD void snoop_status(snoop_t *s)
 {
-   uint8_t p[1 + 2 + 10 + 4 + 4 + 2 + 4 + 3 * 4];
+   uint8_t p[1 + 2 + 10 + 4 + 4 + 2 + 4 + 3 * 4 + 2 + 2 + 4 + 4];
    size_t n = 0;
    frame_close(s);
    p[n++] = SNOOP_F_STATUS;
@@ -190,8 +190,26 @@ SNOOP_COLD void snoop_status(snoop_t *s)
    n += put_u16(p + n, (uint16_t)(s->ring_hiwater > 0xFFFF ? 0xFFFF : s->ring_hiwater));
    n += put_u32(p + n, s->writes);
    for (int i = 0; i < 3; i++) n += put_u32(p + n, s->hot->late[i]);
+   /* version 4: CPU left to the main loop since the last STATUS (0xFFFF: not sampled) */
+   n += put_u16(p + n, s->load_window ? (uint16_t)(s->load_irq * 1000u / s->load_window) : 0xFFFF);
+   n += put_u16(p + n, s->load_window ? s->load_max : 0xFFFF);
+   n += put_u32(p + n, s->loop_passes);
+   n += put_u32(p + n, s->loop_max_us);
    emit(s, p, n);
    s->ring_hiwater = 0;
+   s->load_window = s->load_irq = 0;
+   s->load_max = 0;
+   s->loop_passes = s->loop_max_us = 0;
+}
+
+SNOOP_COLD void snoop_load_sample(snoop_t *s, uint32_t window, uint32_t irq)
+{
+   if (!window) return;
+   if (irq > window) irq = window;
+   s->load_window += window;
+   s->load_irq += irq;
+   const uint16_t pm = (uint16_t)((uint64_t)irq * 1000u / window);
+   if (pm > s->load_max) s->load_max = pm;
 }
 
 /* Page map for the ranges; 0 or an error (see snoop_start). */
@@ -255,6 +273,10 @@ SNOOP_COLD int snoop_start(snoop_t *s, const snoop_range_t *ranges, uint8_t nran
    s->ring_hiwater = 0;
    s->writes = 0;
    s->last_status_us = now_us;
+   s->load_window = s->load_irq = 0;
+   s->load_max = 0;
+   s->loop_passes = s->loop_max_us = 0;
+   s->have_poll = 0;
 
    uint8_t p[1 + 1 + 4 + 4 + 1 + 1 + 4 * SNOOP_MAX_RANGES];
    size_t n = 0;
@@ -282,6 +304,10 @@ SNOOP_COLD int snoop_start(snoop_t *s, const snoop_range_t *ranges, uint8_t nran
 SNOOP_COLD uint32_t snoop_poll(snoop_t *s, uint32_t now_us, uint32_t now_stamp)
 {
    if (!s->running) return 0;
+   if (s->have_poll && (uint32_t)(now_us - s->last_poll_us) > s->loop_max_us) s->loop_max_us = now_us - s->last_poll_us;
+   s->last_poll_us = now_us;
+   s->have_poll = 1;
+   s->loop_passes++;
    snoop_hot_t *hot = s->hot;
    uint32_t taken = 0;
    uint32_t tail = hot->tail;

@@ -55,6 +55,10 @@ live over TCP/serial, ALSA optional. Pi Zero bench (owner): fast sampling 22-29 
 to it. `make test-native` (needs the git fetch). **Owner, Pi Zero + hardware: live recording to WAV works and sounds
 decent.** ALSA playback not yet on a real sound card (a USB sound adapter next). `--serve`: listeners on 8000 (HTTP,
 endless WAV, a page at /) and 8001 (raw PCM); tested here (exact slices, headless Chromium plays it), not on the Pi.
+0.9-sn5 (STATUS v4, `SNOOP_PROTO_VERSION` 4): CPU left to the main loop, for phase 2 (reSID on the Teensy): every
+100 ms during a capture `SnoopMeasureLoad` spins 0.5 ms on the cycle counter (gaps = interrupts; the ISR untouched),
+`snoop_poll` counts loop passes and the longest; `--isr` prints them. Host-tested and ARM-compiled, not on hardware.
+reSID 1.0 needs 17-21 MB of filter tables: phase 2 would use reSID 0.16 (`docs/USB-AUDIO.md`, findings).
 0.9-sn4: snoop's own TCP data port 2113 (`SnoopDataPortService`; the clients try it first, then 2112); host-tested, not
 on hardware. NativeEthernet's `EthernetServer::available()` blocks up to 10 s for a new client's first bytes.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every

@@ -22,7 +22,7 @@
 extern "C" {
 #endif
 
-#define SNOOP_PROTO_VERSION 3
+#define SNOOP_PROTO_VERSION 4
 
 #ifndef SNOOP_MAX_RANGES
 #define SNOOP_MAX_RANGES   16     /* address ranges per start command */
@@ -166,6 +166,15 @@ typedef struct {
    uint32_t       last_status_us;
    uint32_t       writes;
 
+   /* CPU left to the main loop (version 4), since the last STATUS */
+   uint64_t       load_window;    /* CPU cycles sampled (snoop_load_sample) */
+   uint64_t       load_irq;       /* ...of them taken by interrupts */
+   uint16_t       load_max;       /* worst sample, permille */
+   uint32_t       loop_passes;    /* snoop_poll calls */
+   uint32_t       loop_max_us;    /* longest time between two */
+   uint32_t       last_poll_us;
+   int            have_poll;
+
    /* output FIFO */
    uint8_t        out[SNOOP_OUT_SIZE];
    uint32_t       out_head, out_tail;
@@ -194,6 +203,11 @@ void snoop_stop(snoop_t *s, uint8_t reason, uint32_t now_us, uint32_t now_stamp)
  * The glue must call it at least every 2^31 stamp ticks (3.5 s at 600 MHz).
  * Returns the number of events taken. */
 uint32_t snoop_poll(snoop_t *s, uint32_t now_us, uint32_t now_stamp);
+
+/* A sample of the CPU time interrupts take from the main loop: the glue spun for window CPU cycles
+ * and irq of them went to interrupts.  STATUS reports the average and the worst sample since the last
+ * one, with the main loop's passes and longest pass (time between snoop_poll calls). */
+void snoop_load_sample(snoop_t *s, uint32_t window, uint32_t irq);
 
 /* Queue a STATUS frame now (closes the open WRITES frame first). */
 void snoop_status(snoop_t *s);

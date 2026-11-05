@@ -115,6 +115,17 @@ bool GetUInt(uint32_t *InVal, uint8_t NumBytes)
    return true;
 }
 
+// The cycle counter as the load measurement (SnoopMeasureLoad) reads it: each read takes 5 CPU cycles, and an
+// interrupt every 609 cycles (one PAL phi2 period) runs for 400 of them: 65.7 % of the CPU to interrupts.
+static uint32_t FakeCyc = 0, FakeNextIrq = 609;
+static uint32_t FakeCycCnt()
+{
+   FakeCyc += 5;
+   while ((int32_t)(FakeCyc - FakeNextIrq) >= 0) { FakeCyc += 400; FakeNextIrq += 609; }
+   return FakeCyc;
+}
+#define SnoopCycCnt() FakeCycCnt()
+
 // the source tree layout of the patched TeensyROM: snoop/ next to the .ino files
 #include "../../firmware/WriteSnoop.h"
 #include "../../firmware/WriteSnoop.ino"
@@ -216,6 +227,7 @@ int main()
    IO1[wRegVid_TOD_Clks] = rvtcNTSC;
    Stream Ntsc;
    Command(&Ntsc, {0x64, 0x53, 1, 1, 0x18, 0xD4, 0x18, 0xD4, 0, 0});
+   SnoopLoadLastMs = millis() - SnoopLoadEveryMs;   // a load sample on the next pass
    Loop();
    LateBy = 600;                           // one interrupt ~1 us late: counted in all three
    Cycle(0xD418, false, 0x0F);

@@ -8,7 +8,7 @@ import binascii
 import struct
 from dataclasses import dataclass, field
 
-PROTO_VERSION = 3
+PROTO_VERSION = 4
 
 F_HELLO, F_WRITES, F_STATUS, F_BYE = 0x01, 0x02, 0x03, 0x04
 BYE_REASONS = {0: "stopped", 1: "replaced", 2: "channel"}
@@ -118,6 +118,10 @@ class Status:
     late: int = 0       # phi2 interrupts that came late (any amount), this run (version 3)
     late250: int = 0    # ...more than ~250 ns late: a cartridge ROM read answered then can be wrong
     late1000: int = 0   # ...more than ~1 us: a whole bus cycle missed
+    irq_permille: int | None = None      # share of the CPU interrupts took from the main loop since the last STATUS,
+    irq_max_permille: int | None = None  # average and worst 0.5 ms sample; None: not sampled (or before version 4)
+    loop_passes: int | None = None       # main-loop passes since the last STATUS (version 4)
+    loop_max_us: int | None = None       # longest main-loop pass since the last STATUS, us (version 4)
 
 
 @dataclass
@@ -162,11 +166,15 @@ def parse_payload(p: bytes):
         dropped, out_dropped, hiw, writes = struct.unpack_from("<IIHI", p, i)
         i += 14
         late = (0, 0, 0)
-        if len(p) == i + 12:                       # version 3
+        load = (None, None, None, None)
+        if len(p) in (i + 12, i + 24):             # version 3, version 4
             late = struct.unpack_from("<III", p, i)
+            if len(p) == i + 24:
+                irq, irq_max, passes, loop_max = struct.unpack_from("<HHII", p, i + 12)
+                load = (None if irq == 0xFFFF else irq, None if irq_max == 0xFFFF else irq_max, passes, loop_max)
         elif len(p) != i:
             raise ValueError("STATUS length")
-        return Status(next_seq, time, dropped, out_dropped, hiw, writes, *late)
+        return Status(next_seq, time, dropped, out_dropped, hiw, writes, *late, *load)
     if t == F_BYE:
         if len(p) != 2:
             raise ValueError("BYE length")
@@ -298,13 +306,27 @@ def writes_payload(seq: int, blocks) -> bytes:
     return bytes(p)
 
 
-def status_payload(next_seq, time, dropped=0, out_dropped=0, hiwater=0, writes=0, late=(0, 0, 0)) -> bytes:
+def status_payload(next_seq, time, dropped=0, out_dropped=0, hiwater=0, writes=0, late=(0, 0, 0),
+                   load=(None, None, 0, 0)) -> bytes:
+    """load: (irq permille, worst permille, loop passes, longest loop pass us); None permille = not sampled."""
+    irq, irq_max, passes, loop_max = load
     return (struct.pack("<BH", F_STATUS, next_seq & 0xFFFF) + put_varint(time)
-            + struct.pack("<IIHI", dropped, out_dropped, hiwater, writes) + struct.pack("<III", *late))
+            + struct.pack("<IIHI", dropped, out_dropped, hiwater, writes) + struct.pack("<III", *late)
+            + struct.pack("<HHII", 0xFFFF if irq is None else irq, 0xFFFF if irq_max is None else irq_max,
+                          passes, loop_max))
 
 
 def bye_payload(reason=0) -> bytes:
     return bytes([F_BYE, reason])
+
+
+def load_text(st: Status) -> str:
+    """The CPU-left-to-the-main-loop part of a STATUS (version 4), for printing; '' before version 4."""
+    if st.loop_passes is None:
+        return ""
+    irq = "not sampled" if st.irq_permille is None else \
+        f"{st.irq_permille / 10:.1f}% (worst 0.5 ms {st.irq_max_permille / 10:.1f}%)"
+    return f"CPU to interrupts {irq}, loop passes {st.loop_passes}, longest {st.loop_max_us / 1000:.2f} ms"
 
 
 def writes_of(frames) -> list[tuple[int, int, int]]:

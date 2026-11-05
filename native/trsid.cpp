@@ -85,6 +85,9 @@ struct Frame {
     uint16_t seq = 0;               // WRITES: seq; STATUS: next_seq
     uint64_t time = 0;              // STATUS
     uint32_t late = 0, late250 = 0, late1000 = 0;
+    bool v4 = false;                // STATUS version 4: the main loop's CPU share
+    uint16_t irq_pm = 0xFFFF, irq_max_pm = 0xFFFF;   // 0xFFFF: not sampled
+    uint32_t loop_passes = 0, loop_max_us = 0;
     int reason = 0;                 // BYE
 };
 
@@ -143,10 +146,17 @@ bool parse(const std::vector<uint8_t>& p, Frame& f) {
         i = 3;
         if (!varint(p, i, f.time)) return false;
         i += 14;                                    // dropped, out_dropped, ring_hiwater, writes
-        if (p.size() == i + 12) {                   // version 3: the late counters
+        if (p.size() == i + 12 || p.size() == i + 24) {   // version 3: the late counters; 4: CPU share
             f.late = le(p, i, 4);
             f.late250 = le(p, i + 4, 4);
             f.late1000 = le(p, i + 8, 4);
+            if (p.size() == i + 24) {
+                f.v4 = true;
+                f.irq_pm = (uint16_t)le(p, i + 12, 2);
+                f.irq_max_pm = (uint16_t)le(p, i + 14, 2);
+                f.loop_passes = le(p, i + 16, 4);
+                f.loop_max_us = le(p, i + 20, 4);
+            }
         } else if (p.size() != i) {
             return false;
         }
@@ -263,7 +273,7 @@ std::vector<uint8_t> bench_stream(double seconds, int digi_hz, uint16_t base, ui
     std::stable_sort(blocks.begin(), blocks.end(), [](const Block& a, const Block& b) { return a.time < b.time; });
     uint64_t end = 1000 + (uint64_t)(seconds * phi2);
     std::vector<uint8_t> w, p;
-    p = {F_HELLO, 3};
+    p = {F_HELLO, 4};
     put_le(p, phi2, 4);
     put_le(p, 600000000, 4);
     p.push_back(0);
@@ -290,6 +300,8 @@ std::vector<uint8_t> bench_stream(double seconds, int digi_hz, uint16_t base, ui
     put_le(p, seq, 2);
     put_varint(p, end);
     for (int k = 0; k < 14 + 12; k++) p.push_back(0);
+    p.push_back(0xFF), p.push_back(0xFF), p.push_back(0xFF), p.push_back(0xFF);   // version 4: not sampled
+    for (int k = 0; k < 8; k++) p.push_back(0);
     put_frame(w, p);
     put_frame(w, {F_BYE, 0});
     return w;
@@ -1187,6 +1199,9 @@ int live(const LiveArgs& a, const Options& o) {
                 printf("# latency %4.0f ms  late bus interrupts/s: %7.1f  >250ns: %6.1f  >1us: %6.1f\n",
                        player.latency * 1000, (f.late - last_status.late) / secs,
                        (f.late250 - last_status.late250) / secs, (f.late1000 - last_status.late1000) / secs);
+                if (f.v4 && f.irq_pm != 0xFFFF)
+                    printf("#   CPU to interrupts %.1f%% (worst 0.5 ms %.1f%%), loop passes %u, longest %.2f ms\n",
+                           f.irq_pm / 10.0, f.irq_max_pm / 10.0, f.loop_passes, f.loop_max_us / 1000.0);
                 fflush(stdout);
             }
             last_status = f;

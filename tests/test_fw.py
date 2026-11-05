@@ -52,6 +52,10 @@ class Glue(unittest.TestCase):
         self.assertEqual([(a, v) for _, a, v in sp.writes_of(fr)], [(0xD418, 0x0F)])
         st = [f for f in fr if isinstance(f, sp.Status)][-1]
         self.assertEqual((st.late, st.late250, st.late1000), (1, 1, 1))
+        # the stub's interrupt takes 400 of every 609 CPU cycles: 65.7 %
+        self.assertAlmostEqual(st.irq_permille, 657, delta=3)
+        self.assertEqual(st.irq_max_permille, st.irq_permille)      # one sample
+        self.assertGreaterEqual(st.loop_passes, 2)
         self.assertIsInstance(fr[-1], sp.Bye)
         self.assertEqual(fr[-1].reason, 0)
 

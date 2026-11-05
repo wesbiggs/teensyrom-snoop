@@ -58,7 +58,8 @@ def main():
                     "serial, at once on TCP). Every USB transfer briefly stops the bus interrupt: do not go below 20 on USB")
     ap.add_argument("--buffer", type=float, default=0.03, help="live: sound card FIFO target, seconds")
     ap.add_argument("--isr", action="store_true", help="live: print the TeensyROM's late bus-interrupt counts every second "
-                    "(firmware 0.9-sn3+): a cartridge game misbehaves when '>250ns' climbs")
+                    "(firmware 0.9-sn3+): a cartridge game misbehaves when '>250ns' climbs; from 0.9-sn5 also the share "
+                    "of its CPU interrupts take and its main loop's passes")
     a = ap.parse_args()
     if not (a.port or a.tcp or a.replay or a.bench):
         ap.error("one of --port, --tcp, --replay or --bench is needed")
@@ -160,6 +161,8 @@ def main():
                         print(f"# latency {player.latency * 1000:4.0f} ms  late bus interrupts/s: {(f.late - last_status.late) / secs:7.1f}  "
                               f">250ns: {(f.late250 - last_status.late250) / secs:6.1f}  "
                               f">1us: {(f.late1000 - last_status.late1000) / secs:6.1f}", flush=True)
+                        if f.loop_passes is not None:
+                            print(f"#   {sp.load_text(f)}", flush=True)
                     last_status = f
                 if isinstance(f, sp.Bye):
                     raise KeyboardInterrupt

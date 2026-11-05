@@ -111,10 +111,10 @@ index 0000000..0555a91
 +#endif
 diff --git a/Source/Teensy/WriteSnoop.ino b/Source/Teensy/WriteSnoop.ino
 new file mode 100644
-index 0000000..9fb4da7
+index 0000000..f612642
 --- /dev/null
 +++ b/Source/Teensy/WriteSnoop.ino
-@@ -0,0 +1,235 @@
+@@ -0,0 +1,267 @@
 +// teensyrom-snoop: the main-loop half.  Command 0x6453 from the USB serial or TCP channel, and
 +// SnoopService() from loop().  Protocol: docs/PROTOCOL.md in teensyrom-snoop.
 +
@@ -154,6 +154,33 @@ index 0000000..9fb4da7
 +EthernetServer SnoopServer(SnoopDataPort);
 +EthernetClient SnoopClient;
 +#endif
++
++// CPU left to the main loop (0.9-sn5, STATUS version 4): how much an emulator running in loop() could have.
++// Every SnoopLoadEveryMs during a capture, spin SnoopLoadWindowUs reading the cycle counter; a gap between two
++// reads longer than the loop's own (the shortest seen, plus SnoopLoadGap) is time an interrupt took (isrPHI2
++// above all, but every interrupt counts).  The ISR is not touched.  Costs 0.5% of the loop's time.
++#define SnoopLoadEveryMs   100
++#define SnoopLoadWindowUs  500
++#define SnoopLoadGap       24      // CPU cycles: an interrupt's entry and exit alone take more
++#ifndef SnoopCycCnt
++#define SnoopCycCnt() ARM_DWT_CYCCNT
++#endif
++uint32_t SnoopLoadLastMs = 0;
++
++FLASHMEM void SnoopMeasureLoad()
++{
++   const uint32_t Window = (uint32_t)(F_CPU_ACTUAL / 1000000u) * SnoopLoadWindowUs;
++   const uint32_t Start = SnoopCycCnt();
++   uint32_t Prev = Start, Now, Irq = 0, Base = 0xFFFFFFFF;
++   while ((Now = SnoopCycCnt()) - Start < Window)
++   {
++      const uint32_t d = Now - Prev;
++      if (d < Base) Base = d;
++      if (d > Base + SnoopLoadGap) Irq += d - Base;
++      Prev = Now;
++   }
++   snoop_load_sample(&SnoopState, Now - Start, Irq);
++}
 +
 +FLASHMEM void SnoopSetup()
 +{
@@ -337,6 +364,11 @@ index 0000000..9fb4da7
 +   }
 +   snoop_poll(&SnoopState, micros(), ARM_DWT_CYCCNT);
 +   const uint32_t Now = millis();
++   if (Now - SnoopLoadLastMs >= SnoopLoadEveryMs)
++   {
++      SnoopLoadLastMs = Now;
++      SnoopMeasureLoad();
++   }
 +   const uint32_t Avail = snoop_out_avail(&SnoopState);
 +   bool Due = Avail && (Avail >= SnoopBatchBytes || Now - SnoopLastSendMs >= SnoopSendEveryMs);
 +#ifdef FeatTCPListen
@@ -352,10 +384,10 @@ index 0000000..9fb4da7
 +#endif
 diff --git a/Source/Teensy/snoop/snoop.c b/Source/Teensy/snoop/snoop.c
 new file mode 100644
-index 0000000..fd5f2cc
+index 0000000..4130dec
 --- /dev/null
 +++ b/Source/Teensy/snoop/snoop.c
-@@ -0,0 +1,323 @@
+@@ -0,0 +1,349 @@
 +/* teensyrom-snoop: main-loop side.  See snoop.h and docs/PROTOCOL.md. */
 +#include "snoop.h"
 +#include <string.h>
@@ -537,7 +569,7 @@ index 0000000..fd5f2cc
 +
 +SNOOP_COLD void snoop_status(snoop_t *s)
 +{
-+   uint8_t p[1 + 2 + 10 + 4 + 4 + 2 + 4 + 3 * 4];
++   uint8_t p[1 + 2 + 10 + 4 + 4 + 2 + 4 + 3 * 4 + 2 + 2 + 4 + 4];
 +   size_t n = 0;
 +   frame_close(s);
 +   p[n++] = SNOOP_F_STATUS;
@@ -548,8 +580,26 @@ index 0000000..fd5f2cc
 +   n += put_u16(p + n, (uint16_t)(s->ring_hiwater > 0xFFFF ? 0xFFFF : s->ring_hiwater));
 +   n += put_u32(p + n, s->writes);
 +   for (int i = 0; i < 3; i++) n += put_u32(p + n, s->hot->late[i]);
++   /* version 4: CPU left to the main loop since the last STATUS (0xFFFF: not sampled) */
++   n += put_u16(p + n, s->load_window ? (uint16_t)(s->load_irq * 1000u / s->load_window) : 0xFFFF);
++   n += put_u16(p + n, s->load_window ? s->load_max : 0xFFFF);
++   n += put_u32(p + n, s->loop_passes);
++   n += put_u32(p + n, s->loop_max_us);
 +   emit(s, p, n);
 +   s->ring_hiwater = 0;
++   s->load_window = s->load_irq = 0;
++   s->load_max = 0;
++   s->loop_passes = s->loop_max_us = 0;
++}
++
++SNOOP_COLD void snoop_load_sample(snoop_t *s, uint32_t window, uint32_t irq)
++{
++   if (!window) return;
++   if (irq > window) irq = window;
++   s->load_window += window;
++   s->load_irq += irq;
++   const uint16_t pm = (uint16_t)((uint64_t)irq * 1000u / window);
++   if (pm > s->load_max) s->load_max = pm;
 +}
 +
 +/* Page map for the ranges; 0 or an error (see snoop_start). */
@@ -613,6 +663,10 @@ index 0000000..fd5f2cc
 +   s->ring_hiwater = 0;
 +   s->writes = 0;
 +   s->last_status_us = now_us;
++   s->load_window = s->load_irq = 0;
++   s->load_max = 0;
++   s->loop_passes = s->loop_max_us = 0;
++   s->have_poll = 0;
 +
 +   uint8_t p[1 + 1 + 4 + 4 + 1 + 1 + 4 * SNOOP_MAX_RANGES];
 +   size_t n = 0;
@@ -640,6 +694,10 @@ index 0000000..fd5f2cc
 +SNOOP_COLD uint32_t snoop_poll(snoop_t *s, uint32_t now_us, uint32_t now_stamp)
 +{
 +   if (!s->running) return 0;
++   if (s->have_poll && (uint32_t)(now_us - s->last_poll_us) > s->loop_max_us) s->loop_max_us = now_us - s->last_poll_us;
++   s->last_poll_us = now_us;
++   s->have_poll = 1;
++   s->loop_passes++;
 +   snoop_hot_t *hot = s->hot;
 +   uint32_t taken = 0;
 +   uint32_t tail = hot->tail;
@@ -681,10 +739,10 @@ index 0000000..fd5f2cc
 +}
 diff --git a/Source/Teensy/snoop/snoop.h b/Source/Teensy/snoop/snoop.h
 new file mode 100644
-index 0000000..a8cfd4a
+index 0000000..23c6e3d
 --- /dev/null
 +++ b/Source/Teensy/snoop/snoop.h
-@@ -0,0 +1,212 @@
+@@ -0,0 +1,226 @@
 +/* teensyrom-snoop: capture C64 bus writes to chosen addresses and stream them.
 + *
 + * Portable C99, also compiled as C++ by the TeensyROM firmware (keep it C++-clean).
@@ -709,7 +767,7 @@ index 0000000..a8cfd4a
 +extern "C" {
 +#endif
 +
-+#define SNOOP_PROTO_VERSION 3
++#define SNOOP_PROTO_VERSION 4
 +
 +#ifndef SNOOP_MAX_RANGES
 +#define SNOOP_MAX_RANGES   16     /* address ranges per start command */
@@ -853,6 +911,15 @@ index 0000000..a8cfd4a
 +   uint32_t       last_status_us;
 +   uint32_t       writes;
 +
++   /* CPU left to the main loop (version 4), since the last STATUS */
++   uint64_t       load_window;    /* CPU cycles sampled (snoop_load_sample) */
++   uint64_t       load_irq;       /* ...of them taken by interrupts */
++   uint16_t       load_max;       /* worst sample, permille */
++   uint32_t       loop_passes;    /* snoop_poll calls */
++   uint32_t       loop_max_us;    /* longest time between two */
++   uint32_t       last_poll_us;
++   int            have_poll;
++
 +   /* output FIFO */
 +   uint8_t        out[SNOOP_OUT_SIZE];
 +   uint32_t       out_head, out_tail;
@@ -881,6 +948,11 @@ index 0000000..a8cfd4a
 + * The glue must call it at least every 2^31 stamp ticks (3.5 s at 600 MHz).
 + * Returns the number of events taken. */
 +uint32_t snoop_poll(snoop_t *s, uint32_t now_us, uint32_t now_stamp);
++
++/* A sample of the CPU time interrupts take from the main loop: the glue spun for window CPU cycles
++ * and irq of them went to interrupts.  STATUS reports the average and the worst sample since the last
++ * one, with the main loop's passes and longest pass (time between snoop_poll calls). */
++void snoop_load_sample(snoop_t *s, uint32_t window, uint32_t irq);
 +
 +/* Queue a STATUS frame now (closes the open WRITES frame first). */
 +void snoop_status(snoop_t *s);

@@ -11,6 +11,28 @@ Instead of `snoop_poll` framing them, a consumer in `loop()` (or a low-priority 
 the emulator to each write's cycle and write the register. That is what `host/sidplay.py`'s
 `SidRenderer.render_to` does, so it is the reference implementation to port.
 
+## Findings so far (2026-11)
+
+* **reSID 1.0 does not fit.** Its 6581 filter model is lookup tables: 21.5 MB of RAM with the newer 8580 filter
+  (`filter8580new.cc`), 17.3 MB with `filter.cc` (measured on the `native/` build). The Teensy 4.1 has 1 MB.
+  So: **reSID 0.16** (the classic, small filter; what Frank Bösing ported to the Teensy 3.x), with its wave
+  tables (~32 KB) in flash. Its 6581 filter is less faithful than 1.0's.
+* **Cost estimate.** On a Raspberry Pi Zero (1 GHz ARM11), reSID 1.0 with fast sampling takes 22-29 % of the core
+  for one SID (tune / 8 kHz digi; `native/`, owner's measurement). A 600 MHz M7 is roughly as fast for this code, and
+  0.16 is cheaper: guess 10-20 % of the M7, not measured. Run from flash (RAM1 is full), so add a margin.
+* **The CPU left over is measured from 0.9-sn5:** STATUS version 4 carries the share interrupts take from the
+  main loop (average and worst 0.5 ms sample) and the loop's passes and longest pass. `trsid.py --isr` or
+  `trsid-native --isr` prints them every second. Run it with the menu showing and with a busy game.
+* **USB audio is now the riskiest piece.** Since this plan was written it was settled that any USB write from the
+  TeensyROM can crash a cartridge game (Ms. Pac-Man), stock firmware too: `schedule_transfer()` runs with
+  interrupts off. The BASEPRI change (`tools/teensy_core_usb_basepri.py`) removed the late interrupts but games still
+  crash, later. USB audio sends a packet every millisecond without pause: the worst case for that. Alternatives:
+  an I2S DAC or MQS/PWM output if the TeensyROM leaves those pins free (check the schematic), or the rendered PCM over
+  Ethernet (768 kbit/s; NativeEthernet has blocked the main loop before).
+* **What the Pi already does:** `native/trsid-native` on a Pi Zero plays and records live, and serves listeners
+  (`--serve`). The on-Teensy version would gain no second computer, lower latency (the cycle counter is "now"),
+  and could answer SID reads.
+
 ## Pieces and risks
 
 1. **Emulator.** reSID has been ported to the Teensy before (Frank Bösing's Teensy64 runs it on a
