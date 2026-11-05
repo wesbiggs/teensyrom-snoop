@@ -103,6 +103,18 @@ class Render(unittest.TestCase):
         self.assertAlmostEqual(len(s) / RATE, 1.0, delta=0.002)
         self.assertAlmostEqual(peak_hz(s[4800:]), 440, delta=3)
 
+    def test_fast_sampling(self):
+        r, s = sidplay.render_stream(stream(tone_writes(1000, 0xD400, 440), PAL), bases=[0xD400],
+                                     sample_rate=RATE, sampling="fast")
+        self.assertAlmostEqual(len(s) / RATE, 1.0, delta=0.002)
+        self.assertAlmostEqual(peak_hz(s[4800:]), 440, delta=3)
+
+    def test_bench(self):
+        c64, cpu, emu, writes = sidplay.bench(sidplay.bench_stream(1.0, digi_hz=4000), bases=[0xD400])
+        self.assertAlmostEqual(c64, 1.0, delta=0.01)
+        self.assertGreater(writes, 4000)
+        self.assertGreater(cpu, 0)
+
 
 class FakeTime:
     def __init__(self):

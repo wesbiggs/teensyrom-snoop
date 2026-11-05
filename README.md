@@ -67,7 +67,13 @@ host/trsid.py --tcp 192.168.1.50 --sid D400 --sid D500 --stereo --model 8580
 host/trsnoop.py --port /dev/ttyACM0 --range D400-D41C          # print the writes
 host/trsnoop.py --tcp 192.168.1.50 --range D020-D021 --raw x.snoop
 host/trsid.py --replay x.snoop --wav x.wav                      # a recording to WAV
+host/trsid.py --bench                                           # can this computer play live? (no C64 needed)
 ```
+
+On a slow computer (a Raspberry Pi Zero), `--bench` times the player on a synthetic tune and an 8 kHz digi
+and prints the share of one core it needs, split into reSIDfp and Python; aim for 70 % or less. `--sampling fast`
+(reSIDfp's decimation instead of its sinc resampler), `--model 8580` and `--no-filter` are cheaper.
+On a 2.1 GHz Xeon core: 7 % (tune) and 10 % (digi), 6581 with filter and resampling.
 
 `trsnoop.py` prints one line per block (C64 cycles, seconds, address, bytes) plus HELLO/STATUS/BYE lines.
 

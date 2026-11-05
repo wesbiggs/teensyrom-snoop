@@ -4,6 +4,7 @@ Pure Python 3, no dependencies.
 """
 from __future__ import annotations
 
+import binascii
 import struct
 from dataclasses import dataclass, field
 
@@ -24,13 +25,9 @@ PHI2_NTSC = 1022727
 
 
 def crc16(data: bytes) -> int:
-    """CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF)."""
-    crc = 0xFFFF
-    for b in data:
-        crc ^= b << 8
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
-    return crc
+    """CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF).  binascii's CRC-CCITT is the same CRC, in C
+    (the bitwise Python loop was the largest cost of the live player on a slow computer)."""
+    return binascii.crc_hqx(data, 0xFFFF)
 
 
 def cobs_decode(data: bytes) -> bytes:

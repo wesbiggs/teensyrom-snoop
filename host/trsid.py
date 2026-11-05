@@ -6,6 +6,8 @@
   trsid.py --tcp 192.168.1.50 --no-play --wav x.wav --seconds 30
   trsid.py --replay sid.snoop --wav sid.wav        # a trsnoop.py --raw recording to WAV
   trsid.py --tcp ... --sid D400 --sid D500 --stereo --model 8580
+  trsid.py --bench                                 # can this computer keep up? (no C64 needed)
+  trsid.py --bench --replay sid.snoop --sampling fast
 
 Needs: pip install pyresidfp numpy (and sounddevice for playing).  The capture is started with
 the SID ranges (each --sid base, $00-$1C), gap 0, so every register write has its own cycle.
@@ -33,7 +35,7 @@ def write_wav(path, samples, rate, channels):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    g = ap.add_mutually_exclusive_group(required=True)
+    g = ap.add_mutually_exclusive_group()
     g.add_argument("--port", help="TeensyROM USB serial port")
     g.add_argument("--tcp", help="TeensyROM IP address (TCP 2112)")
     g.add_argument("--replay", help="a file written by trsnoop.py --raw")
@@ -43,6 +45,10 @@ def main():
     ap.add_argument("--model", choices=["6581", "8580"], default="6581")
     ap.add_argument("--no-filter", action="store_true")
     ap.add_argument("--rate", type=int, default=48000)
+    ap.add_argument("--sampling", choices=["resample", "fast"], default="resample",
+                    help="reSIDfp output: resample (sinc, best) or fast (decimate, cheaper, slight aliasing)")
+    ap.add_argument("--bench", action="store_true", help="time the player on this computer, as fast as it can run: "
+                    "a synthetic tune and a digi tune, or the --replay file. Shows the share of one CPU core needed")
     ap.add_argument("--wav", help="write the audio to this WAV file")
     ap.add_argument("--no-play", action="store_true", help="live: record only, no sound card")
     ap.add_argument("--seconds", type=float, default=0, help="live: stop after this long")
@@ -54,6 +60,8 @@ def main():
     ap.add_argument("--isr", action="store_true", help="live: print the TeensyROM's late bus-interrupt counts every second "
                     "(firmware 0.9-sn3+): a cartridge game misbehaves when '>250ns' climbs")
     a = ap.parse_args()
+    if not (a.port or a.tcp or a.replay or a.bench):
+        ap.error("one of --port, --tcp, --replay or --bench is needed")
 
     try:
         import numpy as np  # noqa: F401
@@ -64,8 +72,27 @@ def main():
         sys.exit("needs pyresidfp: pip install pyresidfp")
 
     bases = [int(b.replace("$", ""), 16) for b in a.sid] or [0xD400]
-    kw = dict(bases=bases, sample_rate=a.rate, model=a.model, stereo=a.stereo, filter=not a.no_filter)
+    kw = dict(bases=bases, sample_rate=a.rate, model=a.model, stereo=a.stereo, filter=not a.no_filter,
+              sampling=a.sampling)
     channels = 2 if a.stereo else 1
+
+    if a.bench:
+        if a.replay:
+            with open(a.replay, "rb") as fh:
+                runs = [(a.replay, fh.read())]
+        else:
+            secs = a.seconds or 10.0
+            runs = [("tune (~1250 writes/s)", sidplay.bench_stream(secs, base=bases[0])),
+                    ("digi 8 kHz (~9250 writes/s)", sidplay.bench_stream(secs, digi_hz=8000, base=bases[0]))]
+        print(f"# {a.model}, filter {'off' if a.no_filter else 'on'}, {a.rate} Hz, sampling {a.sampling}, "
+              f"{len(bases)} SID{'s' if len(bases) > 1 else ''}")
+        for name, data in runs:
+            c64, cpu, emu, writes = sidplay.bench(data, **kw)
+            print(f"{name}: {c64:.1f} s of C64 time, {writes / c64:.0f} writes/s: {100 * cpu / c64:.0f}% of one core "
+                  f"(reSIDfp alone {100 * emu / c64:.0f}%, Python {100 * (cpu - emu) / c64:.0f}%)", flush=True)
+        print("# live play needs well under 100% (the network, the sound card and Python's own threads "
+              "share the core): aim for 70% or less")
+        return
 
     if a.replay:
         with open(a.replay, "rb") as fh:
