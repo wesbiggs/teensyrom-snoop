@@ -17,7 +17,7 @@ pages) can be watched, for example a second SID at `$D500`, the VIC, or a cartri
 | `isrPHI2` cost | same registers saved as stock (checked in the ARM disassembly); a read cycle pays a compare and branch, an unwatched write ~7 instructions |
 | Patch | applies to upstream `6518b966` alone and with teensyrom-vdrive 0.9.0.45 (its HEAD), either order; stock, snoop, vdrive and vdrive + snoop compile for the M7 (`tools/armcheck`) with the same `isrPHI2` saves, and the on-time path is as long as stock's. (Before sn3, `tools/armcheck` silently built the unpatched tree: its earlier results for patched trees were wrong; the CI builds were real.) |
 | Player (`trsid.py`) | renders to WAV; the live path (TCP, real time, `tools/fake_tr.py` as the TeensyROM) matches the offline render (62 dB, no underruns, `make test-live`); not tried on a sound card (the container has none) |
-| Native player (`native/`, `trsid-native`) | for slow computers. Its replay matches `trsid.py` (pitch, length); the live path (TCP and, through a pseudo-terminal, USB serial) matches its offline render (57 dB / bit-identical, no late writes, `tests/live_native.py`). Bench on a Raspberry Pi Zero (owner): fast sampling 22 % of the core (tune) / 29 % (8 kHz digi), interpolate 135-146 %, resample 204-214 %. **On hardware (owner, Pi Zero): live recording to WAV works and sounds decent.** ALSA playback compiled and run against ALSA's null device only (no sound card yet) |
+| Native player (`native/`, `trsid-native`) | for slow computers. Its replay matches `trsid.py` (pitch, length); the live path (TCP and, through a pseudo-terminal, USB serial) matches its offline render (57 dB / bit-identical, no late writes, `tests/live_native.py`); `--serve` listeners (raw and HTTP) get exact slices of what is played, headless Chromium plays the HTTP stream, a stalled listener is dropped. Bench on a Raspberry Pi Zero (owner): fast sampling 22 % of the core (tune) / 29 % (8 kHz digi), interpolate 135-146 %, resample 204-214 %. **On hardware (owner, Pi Zero): live recording to WAV works and sounds decent.** ALSA playback compiled and run against ALSA's null device only (no sound card yet) |
 | End to end with real tunes | three of the TeensyROM's bundled SIDs, played in a 6502 emulator, through the core, the wire and reSIDfp: every write at its exact cycle, audio equal to a direct render |
 | Teensyduino build (GCC 11.3, link, size) | **builds** in CI (`TeensyROM+_0.9_full.hex`; main image RAM1 free for locals 75004, padding 26888). `isrPHI2` saves `{r3-r9, sl, fp, lr}` (already every callee-saved register, so the hook cannot add saves); write cycles branch out to the page-map test; `SnoopTap` stores the entry before `head` |
 | Hardware (owner, 2026-11-03, 0.9-sn1) | **works** over TCP and USB serial. TCP over a multi-hop WiFi link gave many late writes at the old 30 ms latency (now 250 ms by default on TCP). USB serial gave ~0 late writes but glitched or crashed cartridge games (Ms. Pac-Man): every USB transfer runs with interrupts off. 0.9-sn2 batches USB sends (20 ms): **Ms. Pac-Man still misbehaves on USB** (owner). 0.9-sn3 on hardware (owner, 2026-11-03): **TCP much better** (late writes in a 30-45 s clip down from thousands, 8000 on one run, to 538, no audible drops). Ms. Pac-Man on USB still crashes; `--isr` over 16 s showed no missed cycles (`>1us` 0), 12 interrupts >250 ns late (8 of them in the second it crashed) and ~265/s small (<250 ns) lateness, ~1500/s during the launch. Next: the same over TCP, the USB cable with no capture, and a capture of an unwritten address |
@@ -92,10 +92,18 @@ build/native/trsid-native --bench                   # the share of one core, all
 build/native/trsid-native --tcp 192.168.1.50                                      # play live (ALSA)
 build/native/trsid-native --tcp 192.168.1.50 --no-play --wav x.wav --seconds 60   # record, no sound card
 build/native/trsid-native --replay x.snoop --wav x.wav                            # a recording to WAV
+build/native/trsid-native --tcp 192.168.1.50 --no-play --serve                     # listeners over the network
 ```
 
-`--device` picks the ALSA device (`aplay -L` lists them). `tests/live_native.py` checks the live path against
-`tools/fake_tr.py`.
+`--serve` lets other computers listen: `http://<pi>:8000/` is a page with a player (Chromium 153 plays it here;
+Firefox should too; browsers buffer ~2 s), `http://<pi>:8000/sid.wav` the endless WAV for VLC, mpv or ffplay, and
+port 8001 sends raw 16-bit PCM for the least delay: `nc <pi> 8001 | aplay -f S16_LE -r 48000 -c 1` (`-c 2` with
+`--stereo`). `--serve-port N` uses N and N+1. Uncompressed, so 768 kbit/s per listener (mono). Listeners get what the
+Pi plays (paced by its sound card) or, with `--no-play`, the audio at the C64's pace; one that falls ~2 s behind is
+dropped.
+
+`--device` picks the ALSA device (`aplay -L` lists them). `tests/live_native.py` (`make test-native`) checks the live path and the listeners
+against `tools/fake_tr.py`.
 
 `trsnoop.py` prints one line per block (C64 cycles, seconds, address, bytes) plus HELLO/STATUS/BYE lines.
 

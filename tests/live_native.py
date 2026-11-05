@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """Real-time check of native/trsid-native's live path, like tests/live_tcp.py for trsid.py: tools/fake_tr.py
 streams a synthetic tune (random notes, so a match can only be at the right place) at the C64's pace,
-trsid-native --tcp --no-play --wav records it, and the recording is compared with trsid-native's offline
-render of the same stream.  Needs `make -C native` and numpy; timing-dependent, so not in `make test`.
+trsid-native --tcp --no-play --wav --serve-port records it, and the recording is compared with trsid-native's
+offline render of the same stream.  Listeners on the raw and HTTP ports must get exact slices of the recording.  Needs `make -C native` and numpy; timing-dependent, so not in `make test`.
 
   tests/live_native.py [extra trsid-native options, e.g. --sampling interpolate --stereo --sid D400 --sid D420]
 """
 import os
 import random
+import socket
 import subprocess
 import sys
+import threading
+import time
 import wave
 
 import numpy as np
@@ -24,6 +27,7 @@ SNOOP = os.path.join(B, "live.snoop")
 REF = os.path.join(B, "live_ref.wav")
 OUT = os.path.join(B, "live.wav")
 PORT = "23461"
+SERVE = 23462              # HTTP WAV here, raw PCM on SERVE + 1
 PAL = sp.PHI2_PAL
 
 
@@ -64,6 +68,37 @@ def wav(path):
         return a.reshape(-1, w.getnchannels())[:, 0]
 
 
+def listen(port, request, seconds, into):
+    s = socket.create_connection(("127.0.0.1", port))
+    s.settimeout(0.5)
+    if request:
+        s.sendall(request)
+    buf = b""
+    end = time.time() + seconds
+    while time.time() < end:
+        try:
+            d = s.recv(65536)
+        except socket.timeout:
+            continue
+        if not d:
+            break
+        buf += d
+    s.close()
+    into.append(buf)
+
+
+def is_slice(rec, pcm):
+    a = np.frombuffer(pcm[:len(pcm) // 2 * 2], dtype="<i2")
+    if len(a) < 48000:
+        return False, len(a)
+    probe = a[2000:4000]
+    for i in np.flatnonzero(rec == probe[0]):
+        if np.array_equal(rec[i:i + len(probe)], probe):
+            k = int(i) - 2000
+            return bool(k >= 0 and np.array_equal(rec[k:k + len(a)], a)), len(a)
+    return False, len(a)
+
+
 def main():
     extra = sys.argv[1:]
     if not os.path.exists(EXE):
@@ -76,9 +111,19 @@ def main():
     fake = subprocess.Popen([sys.executable, os.path.join(ROOT, "tools", "fake_tr.py"), SNOOP, "--port", PORT,
                              "--once"], stdout=subprocess.PIPE, text=True)
     fake.stdout.readline()
-    r = subprocess.run([EXE, "--tcp", "127.0.0.1", "--tcp-port", PORT, "--no-play", "--wav", OUT,
-                        "--seconds", "5"] + opts, capture_output=True, text=True, timeout=60)
+    p = subprocess.Popen([EXE, "--tcp", "127.0.0.1", "--tcp-port", PORT, "--no-play", "--wav", OUT,
+                          "--seconds", "5", "--serve-port", str(SERVE)] + opts, stdout=subprocess.PIPE, text=True)
+    first = p.stdout.readline()
+    raw, http = [], []
+    ls = [threading.Thread(target=listen, args=(SERVE + 1, None, 3, raw)),
+          threading.Thread(target=listen, args=(SERVE, b"GET /sid.wav HTTP/1.1\r\nHost: x\r\n\r\n", 3, http))]
+    for t in ls:
+        t.start()
+    out = first + p.communicate(timeout=60)[0]
+    for t in ls:
+        t.join()
     fake.wait(10)
+    r = subprocess.CompletedProcess(p.args, p.returncode, out, "")
     print(r.stdout.strip())
     if r.returncode:
         print(r.stderr.strip())
@@ -91,7 +136,14 @@ def main():
     snr = 10 * np.log10(np.sum(a ** 2) / np.sum((seg - a) ** 2))
     secs = len(x) / 48000
     print(f"live: {secs:.2f} s recorded, 1 s window matches the offline render at {k / 48000:.3f} s, SNR {snr:.1f} dB")
-    ok = 4.5 < secs < 7 and snr > 30 and "late 0," in r.stdout
+    rec = np.frombuffer(open(OUT, "rb").read()[44:], dtype="<i2")
+    head, _, body = http[0].partition(b"\r\n\r\n")
+    raw_ok, raw_n = is_slice(rec, raw[0])
+    http_ok, http_n = is_slice(rec, body[44:])
+    http_ok = http_ok and head.startswith(b"HTTP/1.1 200") and body[:4] == b"RIFF"
+    ch = len(rec) // len(x)
+    print(f"listeners: raw {raw_n / ch / 48000:.2f} s exact slice {raw_ok}, HTTP {http_n / ch / 48000:.2f} s exact slice {http_ok}")
+    ok = 4.5 < secs < 7 and snr > 30 and "late 0," in r.stdout and raw_ok and http_ok
     print("OK" if ok else "FAIL")
     sys.exit(0 if ok else 1)
 

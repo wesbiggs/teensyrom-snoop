@@ -4,6 +4,7 @@
 //   trsid-native --tcp 192.168.1.50                   play live (ALSA)
 //   trsid-native --tcp 192.168.1.50 --no-play --wav x.wav --seconds 60    record live, no sound card
 //   trsid-native --port /dev/ttyACM0 --wav x.wav      play and record, over USB serial
+//   trsid-native --tcp 192.168.1.50 --no-play --serve    listeners on :8000 (HTTP WAV) and :8001 (raw PCM)
 //   trsid-native --bench                              time the player on a synthetic tune and an 8 kHz digi
 //   trsid-native --bench --replay sid.snoop           ...or on a recording (host/trsnoop.py --raw)
 //   trsid-native --replay sid.snoop --wav x.wav       a recording to WAV
@@ -840,6 +841,221 @@ std::atomic<bool> g_stop(false);
 
 void on_signal(int) { g_stop = true; }
 
+// Listeners over the network: an endless WAV over HTTP on `port` (a page with a player at /, the stream at
+// /sid.wav) and raw 16-bit little-endian PCM on port + 1 (nc HOST 8001 | aplay -f S16_LE -r 48000 -c 1).
+// Each listener has its own queue; one more than QUEUE_SECONDS behind is dropped, so it cannot hold
+// the player up.
+class AudioServer {
+public:
+    const double QUEUE_SECONDS = 2.0;
+
+    bool start(int port, int rate, int channels) {
+        this->rate = rate;
+        this->channels = channels;
+        if (!listen_on(port, http_fd) || !listen_on(port + 1, raw_fd)) return false;
+        thread = std::thread([this]() { run(); });
+        return true;
+    }
+
+    void stop() {
+        stopping = true;
+        if (thread.joinable()) thread.join();
+        for (auto& c : clients) close(c.fd);
+        if (http_fd >= 0) close(http_fd);
+        if (raw_fd >= 0) close(raw_fd);
+    }
+
+    // Samples as they are played (interleaved).  Called from the audio or render thread.
+    void push(const int16_t* s, size_t n) {
+        std::lock_guard<std::mutex> g(lock);
+        for (auto& c : clients) {
+            if (!c.streaming) continue;
+            for (size_t k = 0; k < n; k++) {         // little-endian whatever the host
+                c.out.push_back((uint8_t)(s[k] & 0xFF));
+                c.out.push_back((uint8_t)((uint16_t)s[k] >> 8));
+            }
+        }
+    }
+
+    uint32_t served = 0, dropped = 0;
+
+private:
+    struct Client {
+        int fd = -1;
+        bool http = false;
+        bool streaming = false;                     // raw: at once; HTTP: once the request is read
+        double since = 0;
+        std::string request;
+        std::vector<uint8_t> out;
+        size_t sent = 0;
+        bool close_after = false;
+    };
+
+    bool listen_on(int port, int& fd) {
+        fd = socket(AF_INET6, SOCK_STREAM, 0);
+        bool v6 = fd >= 0;
+        if (!v6) fd = socket(AF_INET, SOCK_STREAM, 0);
+        int one = 1, zero = 0;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        int err;
+        if (v6) {
+            setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof zero);
+            sockaddr_in6 a = {};
+            a.sin6_family = AF_INET6;
+            a.sin6_addr = in6addr_any;
+            a.sin6_port = htons((uint16_t)port);
+            err = bind(fd, (sockaddr*)&a, sizeof a);
+        } else {
+            sockaddr_in a = {};
+            a.sin_family = AF_INET;
+            a.sin_addr.s_addr = htonl(INADDR_ANY);
+            a.sin_port = htons((uint16_t)port);
+            err = bind(fd, (sockaddr*)&a, sizeof a);
+        }
+        if (err < 0 || listen(fd, 8) < 0) {
+            fprintf(stderr, "cannot listen on port %d: %s\n", port, strerror(errno));
+            return false;
+        }
+        fcntl(fd, F_SETFL, O_NONBLOCK);
+        return true;
+    }
+
+    std::vector<uint8_t> wav_header() {
+        std::vector<uint8_t> h;
+        h.insert(h.end(), {'R', 'I', 'F', 'F'});
+        put_le(h, 0xFFFFFFFF, 4);                   // endless
+        h.insert(h.end(), {'W', 'A', 'V', 'E', 'f', 'm', 't', ' '});
+        put_le(h, 16, 4);
+        put_le(h, 1, 2);
+        put_le(h, channels, 2);
+        put_le(h, rate, 4);
+        put_le(h, rate * channels * 2, 4);
+        put_le(h, channels * 2, 2);
+        put_le(h, 16, 2);
+        h.insert(h.end(), {'d', 'a', 't', 'a'});
+        put_le(h, 0xFFFFFFFF, 4);
+        return h;
+    }
+
+    static void append(std::vector<uint8_t>& out, const std::string& s) { out.insert(out.end(), s.begin(), s.end()); }
+
+    // A request is in: answer it (anything but the stream closes once the answer is sent).
+    void answer(Client& c) {
+        std::string path = "/";
+        size_t sp1 = c.request.find(' ');
+        if (sp1 != std::string::npos) path = c.request.substr(sp1 + 1, c.request.find(' ', sp1 + 1) - sp1 - 1);
+        bool head = c.request.compare(0, 5, "HEAD ") == 0;
+        if (path == "/sid.wav") {
+            append(c.out, "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nCache-Control: no-cache, no-store\r\n"
+                          "Connection: close\r\n\r\n");
+            if (!head) {
+                std::vector<uint8_t> h = wav_header();
+                c.out.insert(c.out.end(), h.begin(), h.end());
+                c.streaming = true;
+                served++;
+            }
+            return;
+        }
+        std::string body;
+        const char* status = "200 OK";
+        if (path == "/" || path == "/index.html") {
+            body = "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" "
+                   "content=\"width=device-width\"><title>trsid</title></head><body style=\"font-family:sans-serif\">"
+                   "<h1>C64 SID, live</h1><audio controls autoplay src=\"/sid.wav\"></audio>"
+                   "<p>Players: <code>/sid.wav</code> on this port (VLC, mpv, ffplay). Lower delay: raw PCM on the "
+                   "next port, <code>nc HOST PORT | aplay -f S16_LE -r " + std::to_string(rate) + " -c " +
+                   std::to_string(channels) + "</code>.</p></body></html>\n";
+        } else {
+            status = "404 Not Found";
+            body = "not found\n";
+        }
+        append(c.out, std::string("HTTP/1.1 ") + status + "\r\nContent-Type: " +
+                          (body[0] == '<' ? "text/html; charset=utf-8" : "text/plain") + "\r\nContent-Length: " +
+                          std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + (head ? "" : body));
+        c.close_after = true;
+    }
+
+    void run() {
+        while (!stopping) {
+            std::vector<pollfd> p = {{http_fd, POLLIN, 0}, {raw_fd, POLLIN, 0}};
+            {
+                std::lock_guard<std::mutex> g(lock);
+                for (auto& c : clients)
+                    p.push_back({c.fd, (short)((c.out.size() > c.sent ? POLLOUT : 0) | POLLIN), 0});
+            }
+            if (poll(p.data(), p.size(), 10) < 0 && errno != EINTR) break;
+            for (int k = 0; k < 2; k++) {
+                if (!(p[k].revents & POLLIN)) continue;
+                int fd = accept(p[k].fd, nullptr, nullptr);
+                if (fd < 0) continue;
+                fcntl(fd, F_SETFL, O_NONBLOCK);
+                int one = 1, sndbuf = 65536;        // the kernel's share of a listener's queue (it can grow to MBs)
+                setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+                setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof sndbuf);
+                std::lock_guard<std::mutex> g(lock);
+                Client c;
+                c.fd = fd;
+                c.http = k == 0;
+                c.streaming = k == 1;
+                c.since = wall_seconds();
+                clients.push_back(std::move(c));
+                if (k == 1) served++;
+            }
+            std::lock_guard<std::mutex> g(lock);
+            double now = wall_seconds();
+            size_t limit = (size_t)(QUEUE_SECONDS * rate * channels * 2);
+            for (size_t i = 0; i < clients.size();) {
+                Client& c = clients[i];
+                bool gone = false;
+                short rev = 0;
+                for (size_t k = 2; k < p.size(); k++)
+                    if (p[k].fd == c.fd) rev = p[k].revents;
+                if (rev & (POLLERR | POLLHUP | POLLNVAL)) gone = true;
+                if (!gone && (rev & POLLIN)) {
+                    char buf[2048];
+                    ssize_t n = recv(c.fd, buf, sizeof buf, 0);
+                    if (n <= 0) gone = true;
+                    else if (c.http && !c.streaming && !c.close_after && c.request.size() < 8192) {
+                        c.request.append(buf, n);
+                        if (c.request.find("\r\n\r\n") != std::string::npos) answer(c);
+                    }                               // a streaming client's further bytes are ignored
+                }
+                if (!gone && c.http && !c.streaming && !c.close_after && now - c.since > 5) gone = true;
+                if (!gone && c.out.size() > c.sent) {
+                    ssize_t n = send(c.fd, c.out.data() + c.sent, c.out.size() - c.sent, MSG_NOSIGNAL);
+                    if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) gone = true;
+                    else if (n > 0) c.sent += n;
+                    if (c.sent == c.out.size()) {
+                        c.out.clear();
+                        c.sent = 0;
+                        if (c.close_after) gone = true;
+                    } else if (c.sent > 65536) {
+                        c.out.erase(c.out.begin(), c.out.begin() + c.sent);
+                        c.sent = 0;
+                    }
+                }
+                if (!gone && c.streaming && c.out.size() - c.sent > limit) {
+                    gone = true;                    // too far behind: it would only fall further
+                    dropped++;
+                }
+                if (gone) {
+                    close(c.fd);
+                    clients.erase(clients.begin() + i);
+                } else {
+                    i++;
+                }
+            }
+        }
+    }
+
+    int rate = 48000, channels = 1;
+    int http_fd = -1, raw_fd = -1;
+    std::atomic<bool> stopping{false};
+    std::thread thread;
+    std::mutex lock;
+    std::vector<Client> clients;
+};
+
 struct LiveArgs {
     const char* tcp = nullptr;
     const char* serial = nullptr;
@@ -852,6 +1068,7 @@ struct LiveArgs {
     bool isr = false;
     const char* wav = nullptr;
     const char* device = "default";
+    int serve = 0;                                  // HTTP WAV on this port, raw PCM on the next; 0: off
 };
 
 #if HAVE_ALSA
@@ -891,6 +1108,16 @@ int live(const LiveArgs& a, const Options& o) {
     }
     std::vector<uint8_t> rest;
     if (!wait_ack(ch, rest)) return 1;
+    AudioServer server;
+    if (a.serve) {
+        if (!server.start(a.serve, o.rate, o.stereo ? 2 : 1)) {
+            ch.write_all({0x64, 0x53, 0x00});
+            return 1;
+        }
+        printf("# listen: http://<this computer>:%d/ (a browser), /sid.wav (VLC, mpv, ffplay); lower delay: "
+               "nc <this computer> %d | aplay -f S16_LE -r %d -c %d\n", a.serve, a.serve + 1, o.rate, o.stereo ? 2 : 1);
+        fflush(stdout);
+    }
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
@@ -900,16 +1127,24 @@ int live(const LiveArgs& a, const Options& o) {
     std::vector<int16_t> recorded;
     std::mutex rec_lock;
     std::atomic<bool> stop_threads(false);
+    // What is played goes to the WAV and the listeners: paced by the sound card when there is one,
+    // else by the C64 (the render thread drains what is due).
+    auto emit = [&](const int16_t* s, size_t n) {
+        if (a.wav) {
+            std::lock_guard<std::mutex> g(rec_lock);
+            recorded.insert(recorded.end(), s, s + n);
+        }
+        if (a.serve) server.push(s, n);
+    };
 
     std::thread pump([&]() {
+        std::vector<int16_t> got;
         while (!stop_threads) {
             player.pump();
-            if (!a.play && a.wav) {
-                std::lock_guard<std::mutex> g(rec_lock);
-                player.drain(recorded);
-            } else if (!a.play) {
-                std::vector<int16_t> sink;
-                player.drain(sink);
+            if (!a.play) {
+                got.clear();
+                player.drain(got);
+                if (!got.empty()) emit(got.data(), got.size());
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(4));
         }
@@ -921,10 +1156,7 @@ int live(const LiveArgs& a, const Options& o) {
             std::vector<int16_t> buf(256 * channels);
             while (!stop_threads) {
                 player.fill(buf.data(), 256);
-                if (a.wav) {
-                    std::lock_guard<std::mutex> g(rec_lock);
-                    recorded.insert(recorded.end(), buf.begin(), buf.end());
-                }
+                emit(buf.data(), buf.size());
                 snd_pcm_sframes_t n = snd_pcm_writei(pcm, buf.data(), 256);
                 if (n < 0 && snd_pcm_recover(pcm, (int)n, 1) < 0) {
                     fprintf(stderr, "sound device: %s\n", snd_strerror((int)n));
@@ -983,11 +1215,13 @@ int live(const LiveArgs& a, const Options& o) {
     }
 #endif
     close(ch.fd);
+    if (a.serve) server.stop();
 
     printf("# latency %.0f ms%s, FIFO %.0f ms, sampling %s\n", player.latency * 1000,
            player.auto_latency ? " (automatic)" : "", a.buffer * 1000, sampling_name(o.sampling));
     printf("# writes late %u, underruns %u, drift: dropped %u repeated %u, lost frames %u, bad frames %u\n",
            player.r.late, player.underruns, player.dropped, player.repeated, lost, dec.bad_frames);
+    if (a.serve) printf("# listeners: %u, dropped for falling behind %u\n", server.served, server.dropped);
     if (have_status) {
         double secs = std::max((double)last_status.time / player.r.phi2, 1e-3);
         printf("# late bus interrupts in %.0f s: %u (>250ns %u, >1us %u)\n", secs, last_status.late,
@@ -1017,6 +1251,9 @@ void usage() {
           "  --buffer S          live: FIFO target, seconds (0.03)\n"
           "  --send-ms N         how often the TeensyROM sends (default 20 on USB serial, at once on TCP)\n"
           "  --isr               live: the TeensyROM's late bus-interrupt counts every second\n"
+          "  --serve             live: listeners over the network: http://HOST:8000/ (a browser; /sid.wav for\n"
+          "                      VLC, mpv, ffplay), raw PCM on 8001 (nc HOST 8001 | aplay -f S16_LE -r 48000 -c 1)\n"
+          "  --serve-port N      the same on N and N+1\n"
           "  --model 6581|8580  --no-filter  --rate HZ (48000)  --sid HEX (repeat; D400)  --stereo\n"
           "  --sampling fast|interpolate|resample   (live: fast; replay: interpolate; bench: all three)\n",
           stderr);
@@ -1048,6 +1285,8 @@ int main(int argc, char** argv) {
         else if (a == "--no-play") la.play = false;
         else if (a == "--isr") la.isr = true;
         else if (a == "--device") la.device = val();
+        else if (a == "--serve") la.serve = 8000;
+        else if (a == "--serve-port") la.serve = atoi(val());
         else if (a == "--wav") la.wav = val();
         else if (a == "--seconds") seconds = atof(val());
         else if (a == "--rate") o.rate = atoi(val());
@@ -1078,7 +1317,7 @@ int main(int argc, char** argv) {
     if (la.tcp || la.serial) {
         if (!sampling_set) o.sampling = reSID::SAMPLE_FAST;
         la.seconds = seconds;
-        if (!la.play && !la.wav) fprintf(stderr, "# --no-play without --wav: nothing is kept\n");
+        if (!la.play && !la.wav && !la.serve) fprintf(stderr, "# --no-play without --wav: nothing is kept\n");
         return live(la, o);
     }
     std::vector<uint8_t> data;

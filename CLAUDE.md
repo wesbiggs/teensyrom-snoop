@@ -53,7 +53,8 @@ Host only: `trsid.py --bench` showed a Pi Zero needs 291-463 % of its core (reSI
 has `trsid-native` (C++, classic reSID fetched by `native/Makefile` at a fixed commit, not committed): bench, replay,
 live over TCP/serial, ALSA optional. Pi Zero bench (owner): fast sampling 22-29 %, the only usable one; live defaults
 to it. `make test-native` (needs the git fetch). **Owner, Pi Zero + hardware: live recording to WAV works and sounds
-decent.** ALSA playback not yet on a real sound card (a USB sound adapter next).
+decent.** ALSA playback not yet on a real sound card (a USB sound adapter next). `--serve`: listeners on 8000 (HTTP,
+endless WAV, a page at /) and 8001 (raw PCM); tested here (exact slices, headless Chromium plays it), not on the Pi.
 0.9-sn4: snoop's own TCP data port 2113 (`SnoopDataPortService`; the clients try it first, then 2112); host-tested, not
 on hardware. NativeEthernet's `EthernetServer::available()` blocks up to 10 s for a new client's first bytes.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
