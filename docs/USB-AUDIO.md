@@ -29,6 +29,22 @@ the emulator to each write's cycle and write the register. That is what `host/si
   crash, later. USB audio sends a packet every millisecond without pause: the worst case for that. Alternatives:
   an I2S DAC or MQS/PWM output if the TeensyROM leaves those pins free (check the schematic), or the rendered PCM over
   Ethernet (768 kbit/s; NativeEthernet has blocked the main loop before).
+* **Host port vs device port.** The Teensy 4.1 has two USB controllers. The crashes above are on the micro-USB
+  port, where the Teensy is a device (the core's `usb.c`). The TeensyROM's USB-A port is the Teensy as host: another
+  controller and another driver (`USBHost_t36`, in TeensyROM's `src/`), which switches interrupts off only in short
+  sections (its timer list, memory pool, the MIDI and serial drivers), not per transfer. So the host port may well be
+  safe for cartridge games. Untested; the cheap check is Ms. Pac-Man for several minutes while the USB-A port is busy
+  (a USB MIDI controller sending notes, or a USB drive being read).
+* **But a USB sound card on the host port has no driver.** USB audio is always isochronous, and `USBHost_t36` has no
+  isochronous support (`ehci.cpp`: "TODO: skip past iTD, siTD when/if we support isochronous") and no audio class
+  driver. A full-speed sound card behind a high-speed hub, or on the root port through the controller's built-in
+  transaction translator, needs split isochronous transactions (siTD) in the EHCI periodic schedule: the most
+  intricate part of EHCI, to be written from scratch, plus a USB Audio Class driver. A large project; no known
+  existing port (third-party forks not searched).
+* **Output options, simplest first:** (1) I2S or MQS/PWM pins, if the TeensyROM leaves them free (the Teensy Audio
+  library already drives both); (2) rendered PCM over Ethernet to something like the Pi; (3) a USB sound card on the
+  USB-A port, after the driver work above; (4) the Teensy as a USB sound card on micro USB (this plan's original
+  route), which runs into the device-port crashes.
 * **What the Pi already does:** `native/trsid-native` on a Pi Zero plays and records live, and serves listeners
   (`--serve`). The on-Teensy version would gain no second computer, lower latency (the cycle counter is "now"),
   and could answer SID reads.
