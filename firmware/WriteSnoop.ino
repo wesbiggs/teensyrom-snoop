@@ -33,7 +33,7 @@ DMAMEM uint8_t SnoopTxBuf[2048];   // one USB serial transmit buffer (TX_SIZE) p
 // file transfers) during a capture.  A start on 2112 or USB serial still works as before.
 // NativeEthernet's EthernetServer::available() listens on first call, and hands over a client only once it has
 // sent something, waiting up to 10 s for that: a client must send its command right after connecting.
-#define SnoopDataPort 2113
+#define SnoopDataPort 6581
 EthernetServer SnoopServer(SnoopDataPort);
 EthernetClient SnoopClient;
 #endif

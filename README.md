@@ -122,8 +122,8 @@ lasts a minute to several minutes instead of crashing at once. It still crashes 
 show for it, so that cause is open. Long runs with no capture and over TCP come next; if only USB crashes, the Mac's
 ground or 5 V through USB is the suspect (try a powered hub or a USB isolator).
 
-**Port 2113 (0.9-sn4).** Over TCP the clients connect to snoop's own data port, 2113, and the stream stays on that
-connection. The TeensyROM's port 2112 stays free for other tools during a capture (`trls`, `trvdrive`, file
+**Port 6581 (0.9-sn5; 2113 in sn4).** Over TCP the clients connect to snoop's own data port, 6581, and the stream
+stays on that connection. The TeensyROM's port 2112 stays free for other tools during a capture (`trls`, `trvdrive`, file
 transfers), within the TeensyROM's own limits: most commands answer "Busy!" while a program runs. With firmware
 before sn4 the clients fall back to 2112 by themselves (`--tcp-port` picks one).
 

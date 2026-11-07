@@ -50,6 +50,6 @@ Host only (no SNREV change): `trsid.py` live latency is automatic by default (`L
 arrival delay over 6 s + 10 ms, 15-500 ms, slewed), FIFO 30 ms, `sounddevice` low latency. The old fixed 250 ms on TCP
 was the lag the owner heard. Not yet on hardware.
 0.9-sn4: snoop's own TCP data port 2113 (`SnoopDataPortService`; the clients try it first, then 2112); host-tested, not
-on hardware. NativeEthernet's `EthernetServer::available()` blocks up to 10 s for a new client's first bytes.
+on hardware. 0.9-sn5: that port is 6581 instead of 2113 (sn4 firmware: the clients fall back to 2112). NativeEthernet's `EthernetServer::available()` blocks up to 10 s for a new client's first bytes.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
 file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.

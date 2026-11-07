@@ -111,7 +111,7 @@ index 0000000..0555a91
 +#endif
 diff --git a/Source/Teensy/WriteSnoop.ino b/Source/Teensy/WriteSnoop.ino
 new file mode 100644
-index 0000000..9fb4da7
+index 0000000..2d44f3d
 --- /dev/null
 +++ b/Source/Teensy/WriteSnoop.ino
 @@ -0,0 +1,235 @@
@@ -150,7 +150,7 @@ index 0000000..9fb4da7
 +// file transfers) during a capture.  A start on 2112 or USB serial still works as before.
 +// NativeEthernet's EthernetServer::available() listens on first call, and hands over a client only once it has
 +// sent something, waiting up to 10 s for that: a client must send its command right after connecting.
-+#define SnoopDataPort 2113
++#define SnoopDataPort 6581
 +EthernetServer SnoopServer(SnoopDataPort);
 +EthernetClient SnoopClient;
 +#endif

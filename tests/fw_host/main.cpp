@@ -263,7 +263,7 @@ int main()
       }
    }
 
-   // 8. the data port (2113): start and stream there, 2112 stays free, junk and other commands refused there
+   // 8. the data port (6581): start and stream there, 2112 stays free, junk and other commands refused there
    {
       tcpClient = EthernetClient();                     // a client on 2112, idle
       tcpClient.assigned = tcpClient.up = true;

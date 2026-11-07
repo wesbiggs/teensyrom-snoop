@@ -57,7 +57,7 @@ class Glue(unittest.TestCase):
 
 
 class DataPort(unittest.TestCase):
-    def test_stream_on_2113(self):
+    def test_stream_on_6581(self):
         dec, fr, data = frames("fw_dataport.bin")
         self.assertTrue(data.startswith(sp.ACK))
         self.assertEqual(fr[0].ranges, [(0xD418, 0xD418)])

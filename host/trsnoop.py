@@ -21,11 +21,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import snoopproto as sp  # noqa: E402
 
 
-DATA_PORT, CONTROL_PORT = 2113, 2112
+DATA_PORT, CONTROL_PORT = 6581, 2112
 
 
 class TcpChan:
-    """port None: the snoop data port (2113, firmware 0.9-sn4+), else the TeensyROM's own port (2112)."""
+    """port None: the snoop data port (6581, firmware 0.9-sn5+; sn4 used 2113), else the TeensyROM's own port (2112)."""
     def __init__(self, host: str, port: int | None = None):
         if port is None:
             try:
@@ -132,7 +132,7 @@ def main():
     g.add_argument("--port", help="TeensyROM USB serial port")
     g.add_argument("--tcp", help="TeensyROM IP address (TCP 2112)")
     g.add_argument("--replay", help="decode a file written with --raw")
-    ap.add_argument("--tcp-port", type=int, help="default: the snoop data port 2113, or 2112 when the firmware has none")
+    ap.add_argument("--tcp-port", type=int, help="default: the snoop data port 6581, or 2112 when the firmware has none")
     ap.add_argument("--range", action="append", default=[], help="hex address or range (repeatable)")
     ap.add_argument("--gap", type=int, default=0, help="C64 cycles a write may follow the previous one and still join its block, sharing its time; 0 (default) = every write exactly timed. For the SID keep 0: see README")
     ap.add_argument("--send-ms", type=int, default=0, help="how often the TeensyROM sends, ms (default: 20 on USB serial, "
