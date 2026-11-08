@@ -203,4 +203,4 @@ the registers `isrPHI2` saves (see the script for the repositories it needs).
 ## Next
 
 * On hardware: `trsnoop.py --range D400-D41C` while the TeensyROM's SID player runs a tune, then `trsid.py`.
-* Phase 2, the SID emulated on the Teensy with USB audio out: `docs/USB-AUDIO.md`.
+* Phase 2, the SID emulated on the Teensy, out through a USB audio dongle on the host port: `docs/USB-AUDIO.md`.

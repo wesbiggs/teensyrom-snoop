@@ -2,7 +2,7 @@
 
 Capture C64 bus writes to chosen addresses in the TeensyROM+ phi2 ISR and stream them (COBS + CRC-16
 frames, exact cycle times) over USB serial / TCP; `host/trsid.py` plays SID writes through reSIDfp.
-Read `README.md` (status table, decisions) and `docs/PROTOCOL.md` first; `docs/USB-AUDIO.md` is phase 2.
+Read `README.md` (status table, decisions) and `docs/PROTOCOL.md` first; `docs/USB-AUDIO.md` is phase 2 (emulator on the Teensy, USB audio dongle on the host port).
 
 ## Rules
 * `core/` is C99 and must stay C++-clean (the firmware compiles it as C++). Every function is `SNOOP_COLD`
