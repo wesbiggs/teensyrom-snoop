@@ -184,7 +184,11 @@ class LivePlayer:
     AUTO_MIN, AUTO_MAX = 0.015, 0.5
     AUTO_MARGIN = 0.010    # above the measured 99th-percentile frame delay
     AUTO_WINDOW = 6.0      # seconds of frame delays kept
-    AUTO_UP, AUTO_DOWN = 0.05, 0.010   # how fast the latency may move, seconds per second
+    # How fast the latency may move, seconds per second.  Both must stay below what the drift correction can do
+    # (MAX_STEP per callback: 15.6 ms/s at 48 kHz, 256-sample blocks).  Raising the latency pauses the renderer and
+    # the FIFO drains: at 50 ms/s it ran dry (underruns, on hardware with Ms. Pac-Man); slower costs a few more late
+    # writes while it rises, each applied a few ms off, which is far less audible than a gap.
+    AUTO_UP, AUTO_DOWN = 0.012, 0.010
     JUMP_FIFOS = 4         # a jump of "now" by more than this many FIFO targets while playing is skipped, not queued
     MAX_STEP = 4           # samples dropped or repeated per sound card callback at most (4 per 256: 15.6 ms/s at 48 kHz)
 

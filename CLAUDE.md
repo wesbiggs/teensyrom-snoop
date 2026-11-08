@@ -53,7 +53,8 @@ was the lag the owner heard. Not yet on hardware.
 on hardware. 0.9-sn5: that port is 6581 instead of 2113 (sn4 firmware: the clients fall back to 2112). NativeEthernet's `EthernetServer::available()` blocks up to 10 s for a new client's first bytes.
 0.9-sn6 (phase 2 step 1): the main-loop CPU probe (`snoop_cpu_probe`, 1 ms every 100 ms while a capture runs, STATUS v4,
 `trsid.py --isr` prints `CPU free`). It touches no ISR code. On hardware (owner, menu idle, TCP): 60.9% free, longest
-interruption 41 us with no late phi2 (a lower-priority interrupt). A busy game is next.
+interruption 41 us with no late phi2 (a lower-priority interrupt); Ms. Pac-Man running: 43.3% free. At 816 MHz that is
+~497 / ~353 M cycles/s. Step 1 done.
 Host only: the live player's drift correction drops/repeats up to 4 samples per callback (was 1): at 1 it removed
 3.9 ms/s while the automatic latency came down at 10 ms/s, and the excess sat in the FIFO as unreported delay (the
 owner's run dropped on nearly every callback for 50 s). Rerun (owner): latency steady at 60 ms, yet dropped 20888 / repeated 1974 /
@@ -66,6 +67,8 @@ the player and starts the sound card before the start command, and a forward jum
 playing is skipped, not queued. `--isr` lines show the FIFO and the drops/repeats of each second. On hardware (owner,
 menu idle, 23 s): dropped 966, repeated 777, 1 underrun, FIFO 34 ms at the end: fixed; what is left is the "now"
 estimate's jitter with one STATUS a second. The "sound card took N samples/s" line is too coarse (47881/s would have
-meant ~2700 net drops; there were ~190): it counts from the first callback, during PortAudio's start-up fill.
+meant ~2700 net drops; there were ~190): it counts from the first callback, during PortAudio's start-up fill. With Ms. Pac-Man (TCP, 42 s): 113 underruns, latency raised to
+103 ms: the automatic latency rose at 50 ms/s and repeats add only 15.6 ms/s, so the FIFO ran dry (reproduced in a
+simulation: 16 underruns, 0 at 12 ms/s). AUTO_UP is now 12 ms/s. Not yet on hardware.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
 file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.

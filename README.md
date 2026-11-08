@@ -209,4 +209,5 @@ the registers `isrPHI2` saves (see the script for the repositories it needs).
   average at the end. Run it with the menu showing and with a busy game (STATUS v4, docs/PROTOCOL.md).
   **Menu idle, on hardware (owner, 2026-11-07, TCP, 50 s): 60.9% free** on average; the longest interruption 41 us,
   with no phi2 interrupt >250 ns late, so it was a lower-priority interrupt (Ethernet, USB host) with phi2 running
-  inside it. A busy game (Ms. Pac-Man, over TCP) is next.
+  inside it. **Ms. Pac-Man running (joystick in use), TCP, 42 s: 43.3% free**, no interrupt >250 ns late. The
+  TeensyROM runs at 816 MHz (HELLO's cpu_hz), so that leaves ~497 M cycles/s idle and **~353 M cycles/s** in the game.

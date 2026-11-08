@@ -283,6 +283,34 @@ class AutoLatency(unittest.TestCase):
         self.assertLess(max(settled), 1.3 * p.target)
         self.assertEqual(p.underruns, 0)
 
+    def test_rising_latency_does_not_run_the_fifo_dry(self):
+        """The link gets worse (jitter 5 -> 80 ms) and the latency must rise: the FIFO may not run dry while it
+        does (16 underruns at the old 50 ms/s, faster than the 15.6 ms/s that repeats can add)."""
+        ft = FakeTime()
+        p = sidplay.LivePlayer(sidplay.SidRenderer(bases=[0xD400], sample_rate=RATE), now=ft)
+        start = ft.t
+        p.feed(sp.Hello(sp.PROTO_VERSION, PAL, 600_000_000, 0, [(0xD400, 0xD41C)]))
+        rng = np.random.default_rng(7)
+        pending = []
+        for k in range(1, int(14 / 0.002)):
+            jitter = 0.005 if k * 0.002 < 4 else 0.080
+            pending.append((start + k * 0.002 + 0.001 + rng.uniform(0, jitter),
+                            sp.Writes(k, [sp.Block(int(k * 0.002 * PAL), 0xD401, bytes([k & 0x3F]))])))
+        pending.sort(key=lambda x: x[0])
+        lat = []
+        t_next_cb = ft.t
+        while ft.t < start + 14:
+            ft.t += 0.001
+            while pending and pending[0][0] <= ft.t:
+                p.feed(pending.pop(0)[1])
+            p.pump()
+            while t_next_cb <= ft.t:
+                p.fill(256)
+                t_next_cb += 256 / RATE
+            lat.append(p.latency)
+        self.assertGreater(max(lat), 0.070)                   # it did rise
+        self.assertEqual(p.underruns, 0)
+
     def test_rare_spikes_are_ridden_out(self):
         p, hist = self.run_link(jitter=0.005, spikes=0.002)    # 0.2 % of frames 50 ms late
         self.assertLess(p.latency, 0.045)

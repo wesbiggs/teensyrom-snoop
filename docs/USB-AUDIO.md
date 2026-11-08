@@ -35,7 +35,7 @@ the emulator to each write's cycle and write the register. That is what `host/si
 1. **Emulator.** reSID has been ported to the Teensy before (Frank Bösing's Teensy64 runs it on a
    Teensy 3.6). reSIDfp is heavier. Start with reSID in "fast" sampling mode at 48 kHz (the dongle's native rate).
    * **CPU budget, the unknown.** `isrPHI2` runs on every phi2 cycle and takes a large share of the
-     600 MHz. It busy-waits to the data setup and hold times, so much of each 1 µs cycle is gone.
+     816 MHz (TeensyROM sets it at boot). It busy-waits to the data setup and hold times, so much of each 1 µs cycle is gone.
      Measure first, with the menu showing and with a game running (step 1 below: the main-loop probe in 0.9-sn6).
      Then compare with reSID's cost on an M7 at 48 kHz (reported in the tens of percent of a slower M4 core).
    * **RAM.** reSID's wave tables are about 4 x 4 KB plus filter tables. They go in flash (`PROGMEM`) or RAM2,
@@ -72,9 +72,11 @@ the emulator to each write's cycle and write the register. That is what `host/si
 
 1. Measure the CPU left over, on hardware, with a busy game. **In 0.9-sn6:** the main-loop probe (1 ms every
    100 ms during a capture) reports it in STATUS v4; `trsid.py --isr` prints it. Menu idle (hardware, 2026-11-07):
-   60.9% of the CPU free, about 365 M cycles/s; the longest interruption 41 us (a lower-priority interrupt with
-   phi2 nested in it, no late phi2), so the audio path needs a buffer of well over 41 us, which a few ms is.
-   A busy game is still to measure.
+   60.9% of the CPU free; **Ms. Pac-Man running: 43.3%**. The TeensyROM runs at 816 MHz (`set_arm_clock` in
+   Teensy.ino), so that is ~497 and **~353 M cycles/s** for an emulator. The longest interruption was 41 us (a
+   lower-priority interrupt with phi2 nested in it, no late phi2), so the audio path needs a buffer of well over
+   41 us, which a few ms is. Step 2 must fit reSID at 48 kHz in well under 353 M cycles/s, with room for the rest of
+   `loop()` and the USB driver.
 2. Port `render_to` with reSID into a `snoop` consumer. Output to a buffer only, and time it.
 3. Independently of 2: the UAC1 host driver and siTD support, tested with a sine wave on one adaptive dongle,
    and with Ms. Pac-Man running to confirm the host port leaves `isrPHI2` alone (`trsid.py --isr`'s late counts over TCP).
