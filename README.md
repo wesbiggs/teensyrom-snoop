@@ -207,3 +207,6 @@ the registers `isrPHI2` saves (see the script for the repositories it needs).
   Step 1, the CPU left over, is in 0.9-sn6 (not yet on hardware): `trsid.py --isr` prints each second the share of
   the CPU the interrupts leave to the main loop (`CPU free`), the worst 1 ms and the longest interrupt, and the
   average at the end. Run it with the menu showing and with a busy game (STATUS v4, docs/PROTOCOL.md).
+  **Menu idle, on hardware (owner, 2026-11-07, TCP, 50 s): 60.9% free** on average; the longest interruption 41 us,
+  with no phi2 interrupt >250 ns late, so it was a lower-priority interrupt (Ethernet, USB host) with phi2 running
+  inside it. A busy game (Ms. Pac-Man, over TCP) is next.

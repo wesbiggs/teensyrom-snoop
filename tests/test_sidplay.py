@@ -193,6 +193,7 @@ class AutoLatency(unittest.TestCase):
             seq += 1
         pending.sort(key=lambda x: x[0])
         history = []
+        p.fifo_hist = []                           # FIFO level after each callback
         t_next_cb = start + 0.05
         while ft.t < start + seconds:
             ft.t += 0.001
@@ -201,6 +202,7 @@ class AutoLatency(unittest.TestCase):
             p.pump()
             while t_next_cb <= ft.t:
                 p.fill(256)
+                p.fifo_hist.append(p.fifo_len)
                 t_next_cb += 256 / RATE
             history.append(p.latency)
         return p, history
@@ -215,6 +217,16 @@ class AutoLatency(unittest.TestCase):
     def test_fast_link_gets_low_latency(self):
         p, hist = self.run_link(jitter=0.002)
         self.assertLess(p.latency, 0.020)
+        self.assertEqual(p.underruns, 0)
+
+    def test_fifo_follows_the_latency_down(self):
+        """Lowering the latency means dropping samples: the drift correction must keep up with AUTO_DOWN,
+        or the excess sits in the FIFO as delay the printed latency does not show (one sample per
+        callback removed 3.9 ms/s against 10, and the FIFO reached 52 ms of its 30)."""
+        p, hist = self.run_link(jitter=0.002)
+        self.assertLess(p.latency, 0.020)                     # it did come down from 60 ms
+        settled = p.fifo_hist[RATE // 256:]                   # after the first second
+        self.assertLess(max(settled), 1.3 * p.target)
         self.assertEqual(p.underruns, 0)
 
     def test_rare_spikes_are_ridden_out(self):

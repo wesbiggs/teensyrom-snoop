@@ -185,6 +185,7 @@ class LivePlayer:
     AUTO_MARGIN = 0.010    # above the measured 99th-percentile frame delay
     AUTO_WINDOW = 6.0      # seconds of frame delays kept
     AUTO_UP, AUTO_DOWN = 0.05, 0.010   # how fast the latency may move, seconds per second
+    MAX_STEP = 4           # samples dropped or repeated per sound card callback at most (4 per 256: 15.6 ms/s at 48 kHz)
 
     def __init__(self, renderer: SidRenderer, latency=None, buffer=0.03, now=time.monotonic):
         """latency None: automatic, from how late frames arrive (99th percentile of the last
@@ -278,20 +279,30 @@ class LivePlayer:
             if not self.started:
                 out[:] = 0
                 return out
-            # drift correction: one sample per call at most
-            want = n
-            if self.fifo_len > self.target * 5 // 4:
-                want = n + 1
-                self.dropped += 1
-            elif self.fifo_len < self.target * 3 // 4:
-                want = n - 1
-                self.repeated += 1
-            got = self._take(want)
-            if len(got) < want:
-                self.underruns += 1
-            if want == n + 1 and len(got) == want:
-                got = got[1:]
+            # drift correction: up to MAX_STEP samples per call, more the further the FIFO is from its
+            # target, spread evenly through the block.  It must outpace the automatic latency's slew
+            # (AUTO_DOWN): at one sample per 256 it removed only 3.9 ms/s against 10, and the excess sat in
+            # the FIFO, heard as extra delay the printed latency did not show.
+            err = self.fifo_len - self.target
+            k = 0
+            if abs(err) > self.target // 4:
+                k = min(self.MAX_STEP, abs(err) * 8 // max(self.target, 1))   # 2 at a quarter of the target off
+            if err > 0 and k:
+                got = self._take(n + k)
+                if len(got) == n + k:
+                    got = np.delete(got, (np.arange(1, k + 1) * (n + k) // (k + 1)), axis=0)
+                    self.dropped += k
+            elif err < 0 and k:
+                got = self._take(n - k)
+                if len(got) == n - k:
+                    reps = np.ones(n - k, dtype=int)
+                    reps[np.arange(1, k + 1) * (n - k) // (k + 1)] += 1
+                    got = np.repeat(got, reps, axis=0)
+                    self.repeated += k
+            else:
+                got = self._take(n)
             if len(got) < n:
+                self.underruns += 1
                 pad = np.repeat(got[-1:] if len(got) else self.last[None, :], n - len(got), axis=0)
                 got = np.concatenate([got, pad]) if len(got) else pad
             out[:] = got[:n]

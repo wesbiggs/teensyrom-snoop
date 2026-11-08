@@ -71,7 +71,10 @@ the emulator to each write's cycle and write the register. That is what `host/si
 ## Suggested order
 
 1. Measure the CPU left over, on hardware, with a busy game. **In 0.9-sn6:** the main-loop probe (1 ms every
-   100 ms during a capture) reports it in STATUS v4; `trsid.py --isr` prints it. Not yet run on hardware.
+   100 ms during a capture) reports it in STATUS v4; `trsid.py --isr` prints it. Menu idle (hardware, 2026-11-07):
+   60.9% of the CPU free, about 365 M cycles/s; the longest interruption 41 us (a lower-priority interrupt with
+   phi2 nested in it, no late phi2), so the audio path needs a buffer of well over 41 us, which a few ms is.
+   A busy game is still to measure.
 2. Port `render_to` with reSID into a `snoop` consumer. Output to a buffer only, and time it.
 3. Independently of 2: the UAC1 host driver and siTD support, tested with a sine wave on one adaptive dongle,
    and with Ms. Pac-Man running to confirm the host port leaves `isrPHI2` alone (`trsid.py --isr`'s late counts over TCP).

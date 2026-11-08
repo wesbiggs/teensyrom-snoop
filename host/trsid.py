@@ -157,7 +157,8 @@ def main():
         ch.close()
     if stream is not None:
         print(f"# sound card output latency {stream.latency * 1000:.0f} ms")
-    print(f"# latency {player.latency * 1000:.0f} ms{' (automatic)' if player.auto else ''}, FIFO {a.buffer * 1000:.0f} ms")
+    held = f" (at the end {player.fifo_len * 1000 / a.rate:.0f} ms)" if stream is not None else ""
+    print(f"# latency {player.latency * 1000:.0f} ms{' (automatic)' if player.auto else ''}, FIFO {a.buffer * 1000:.0f} ms{held}")
     print(f"# writes late {player.r.late}, underruns {player.underruns}, drift: dropped {player.dropped} "
           f"repeated {player.repeated}, lost frames {dec.lost_frames}")
     if last_status is not None:
