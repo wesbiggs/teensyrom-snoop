@@ -77,6 +77,8 @@ meant ~2700 net drops; there were ~190): it counts from the first callback, duri
 simulation: 16 underruns, 0 at 12 ms/s). AUTO_UP is now 12 ms/s. Not yet on hardware.
 0.9-sn7 (phase 2 step 2): `snoop_t.on_write` hands each captured write with its exact C64 time to a consumer; with
 reSID in the tree (0.9-sn7r) the glue runs one 6581 (48 kHz, SAMPLE_FAST, output discarded) and STATUS v5 reports
-its cost (`emu_cyc` for `emu_c64`; `trsid.py --isr` prints "reSID N% of the time"). Host-tested, not on hardware.
+its cost (`emu_cyc` for `emu_c64`; `trsid.py --isr` prints "reSID N% of the time"). On hardware (owner, 2026-11-08,
+Ms. Pac-Man, TCP): reSID 26.0% of the time, CPU free 48.7%, no late phi2; the player had 0 underruns (AUTO_UP 12 ms/s
+confirmed). Step 2 done; next is step 3, the USB audio host driver.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
 file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.

@@ -227,3 +227,5 @@ the registers `isrPHI2` saves (see the script for the repositories it needs).
   yet on hardware): one 6581 at 48 kHz in fast sampling, clocked to each captured `$D4xx` write on its cycle and to
   "now" on every loop pass. `trsid.py --isr` prints its share of the time each second and on average (STATUS v5).
   On the host its output equals reSID driven directly with the same writes, sample for sample (`make resid test`).
+  **On hardware (owner, 2026-11-08, Ms. Pac-Man running, TCP, 39 s): reSID takes 26.0% of the time** (interrupts
+  included), no phi2 interrupt >250 ns late, and the live player had no underruns (latency 107 ms, 38 late writes).

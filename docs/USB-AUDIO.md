@@ -85,8 +85,11 @@ the emulator to each write's cycle and write the register. That is what `host/si
    one reSID 0.16 (6581, 48 kHz, `SAMPLE_FAST`) to each `$D400-$D41F` write and then to "now" on every loop pass,
    and times it with the cycle counter. STATUS v5 carries the cost (`emu_cyc` for `emu_c64`); `trsid.py --isr`
    prints reSID's share of the time. On the host, the glue's samples equal reSID driven directly with the same
-   writes (`make resid test-sid`). Not yet on hardware. It must stay well below 100% of the time with Ms. Pac-Man
-   running, and leave room for the USB driver.
+   writes (`make resid test-sid`). **On hardware (owner, 2026-11-08, sn7r, Ms. Pac-Man running, TCP, 39 s): reSID
+   takes 26.0% of the time** (wall clock, interrupts included), with 48.7% of the CPU free for the main loop and no
+   phi2 interrupt >250 ns late. Its own compute is then ~26% x 48.7% = ~13% of the 816 MHz, ~100 M cycles/s, about
+   100 CPU cycles per C64 cycle: it fits with ~74% of the main loop's time to spare for the USB driver and the rest.
+   Step 2 done.
 3. Independently of 2: the UAC1 host driver and siTD support, tested with a sine wave on one adaptive dongle,
    and with Ms. Pac-Man running to confirm the host port leaves `isrPHI2` alone (`trsid.py --isr`'s late counts over TCP).
 4. Connect them: the emulator renders into the siTD ring, samples per frame following phi2.
