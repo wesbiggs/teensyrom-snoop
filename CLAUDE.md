@@ -56,6 +56,9 @@ on hardware. 0.9-sn5: that port is 6581 instead of 2113 (sn4 firmware: the clien
 interruption 41 us with no late phi2 (a lower-priority interrupt). A busy game is next.
 Host only: the live player's drift correction drops/repeats up to 4 samples per callback (was 1): at 1 it removed
 3.9 ms/s while the automatic latency came down at 10 ms/s, and the excess sat in the FIFO as unreported delay (the
-owner's run dropped on nearly every callback for 50 s).
+owner's run dropped on nearly every callback for 50 s). Rerun (owner): latency steady at 60 ms, yet dropped 20888 / repeated 1974 /
+8 underruns in 58 s, a steady ~0.7% excess: one clock is off. `trsid.py` now prints at the end the TeensyROM's C64
+time against the computer's clock (ppm, from STATUS arrivals) and the samples/s the sound card took. The TeensyROM
+runs at 816 MHz (`set_arm_clock` in Teensy.ino): HELLO's cpu_hz should say so.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
 file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.

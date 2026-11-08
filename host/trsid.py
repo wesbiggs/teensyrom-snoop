@@ -90,6 +90,7 @@ def main():
 
     player = sidplay.LivePlayer(sidplay.SidRenderer(**kw), latency=a.latency, buffer=a.buffer)
     recorded = []
+    took = [0, None, None]      # samples the sound card took, first and last callback (monotonic)
     stop = threading.Event()
 
     def pump():
@@ -109,6 +110,11 @@ def main():
             sys.exit("playing needs sounddevice (pip install sounddevice), or use --no-play --wav")
 
         def callback(outdata, frames, _time, status):
+            if took[1] is None:
+                took[1] = time.monotonic()      # samples counted from the second callback on
+            else:
+                took[0] += frames
+                took[2] = time.monotonic()
             s = player.fill(frames)
             outdata[:] = s
             if a.wav:
@@ -124,6 +130,7 @@ def main():
     end = time.time() + a.seconds if a.seconds else None
     last_status = None
     cpu_hz, probe_cyc, probe_free = 600_000_000, 0, 0
+    marks = []                  # (arrival, C64 time) of each STATUS: the TeensyROM's clock against this computer's
     try:
         data = rest
         while not (end and time.time() > end):
@@ -132,6 +139,7 @@ def main():
                 if isinstance(f, sp.Hello):
                     cpu_hz = f.cpu_hz
                 if isinstance(f, sp.Status):
+                    marks.append((time.monotonic(), f.time))
                     probe_cyc += f.probe_cyc
                     probe_free += f.probe_free
                     if a.isr and last_status is not None:
@@ -167,6 +175,18 @@ def main():
               f">1us {last_status.late1000})")
     if probe_cyc:
         print(f"# CPU free for the main loop, average: {probe_free * 100 / probe_cyc:.1f}%")
+    # The player renders C64 time at the nominal phi2 and the sound card takes `rate` a second; a steady stream
+    # of drops (or repeats) means one of the two clocks is off.  Least arrival delay at each end, over >= 10 s.
+    if len(marks) >= 12:
+        n = max(3, len(marks) // 10)
+        m0 = min(marks[:n], key=lambda m: m[0] - m[1] / player.r.phi2)
+        m1 = min(marks[-n:], key=lambda m: m[0] - m[1] / player.r.phi2)
+        if m1[0] - m0[0] > 5:
+            ppm = ((m1[1] - m0[1]) / player.r.phi2 / (m1[0] - m0[0]) - 1) * 1e6
+            print(f"# C64 time from the TeensyROM vs this computer's clock: {ppm:+.0f} ppm over {m1[0] - m0[0]:.0f} s "
+                  f"(phi2 {player.r.phi2} Hz, cpu {cpu_hz} Hz in HELLO)")
+    if took[2] is not None and took[2] - took[1] > 5:
+        print(f"# the sound card took {took[0] / (took[2] - took[1]):.1f} samples/s (asked {a.rate})")
     if a.wav and recorded:
         import numpy as np
         write_wav(a.wav, np.concatenate(recorded), a.rate, channels)
