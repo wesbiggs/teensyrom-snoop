@@ -63,6 +63,9 @@ on the Mac) ran before C64 time 0 was marked, and that backlog was rendered into
 unreported delay, dropped over the next ~25 s. That fix was not enough on hardware (15562 drops in 33 s): trsid.py
 also built the renderer (the same warm-up) after the start command, so HELLO waited in `rest`. Now trsid.py builds
 the player and starts the sound card before the start command, and a forward jump of "now" by more than 4 FIFOs while
-playing is skipped, not queued. `--isr` lines show the FIFO and the drops/repeats of each second. Not yet on hardware.
+playing is skipped, not queued. `--isr` lines show the FIFO and the drops/repeats of each second. On hardware (owner,
+menu idle, 23 s): dropped 966, repeated 777, 1 underrun, FIFO 34 ms at the end: fixed; what is left is the "now"
+estimate's jitter with one STATUS a second. The "sound card took N samples/s" line is too coarse (47881/s would have
+meant ~2700 net drops; there were ~190): it counts from the first callback, during PortAudio's start-up fill.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
 file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.
