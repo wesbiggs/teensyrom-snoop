@@ -89,7 +89,8 @@ confirmed). Step 2 done; next is step 3, the USB audio host driver.
 48 kHz, the owner's AB13X dongle `0020:0b21`), and command `64 53 03 mode` (protocol 6; 0 silence, 1 a 1 kHz tone,
 2 report; answered with Ack and a text line; `trsnoop.py --tone on|off|status`). The source is `SnoopAudioSource`
 (192 bytes a frame from the USBHS interrupt): step 4 points it at reSID. Host-tested, compiles for the M7 (also with
-vdrive, both orders; `isrPHI2`/`SnoopTap` identical to sn7; RAM1 +~1.9 KB). **Not yet on hardware**: the owner's
+vdrive, both orders; `isrPHI2`/`SnoopTap` identical to sn7) and builds in CI with Teensyduino 1.61: main image RAM1 free for
+locals 73276 (sn7: 74876). **Not yet on hardware**: the owner's
 checklist is in docs/USB-AUDIO.md ("Trying it on hardware"). Open risks: the embedded TT running siTDs, UPI for siTD IOC.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
 file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.

@@ -126,7 +126,8 @@ touch the library).
   * Memory: the siTDs (1 KB) live in DTCM like the QHs, because the schedule code rewrites the link word of whatever
     precedes a QH, a siTD included, and that write must reach the controller without a cache flush. The packet buffers
     (32 x 256 bytes, 256-aligned so none crosses a 4 KB page) are in RAM2 and flushed after each fill. RAM1 in all:
-    ~1.9 KB (the siTDs, the driver object, ~320 bytes of refill code); the setup code is in flash.
+    1.6 KB measured in CI (RAM1 free for locals 73276, sn7 74876: the siTDs, the driver object, ~320 bytes of refill
+    code); the setup code and the report's strings are in flash.
   * Interrupt masking: only `NVIC_DISABLE_IRQ(IRQ_USBHS)` while the siTDs are linked or unlinked, as the library does when
     it queues a transfer. No global masking. `isrPHI2` and `SnoopTap` compile to the same code as in sn7 (`tools/armcheck`).
 * **The driver (`USBAudioOut.{h,cpp}`, portable parsing in `isoaudio.{h,c}`).** USBHost_t36 offers every interface
