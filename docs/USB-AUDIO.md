@@ -68,6 +68,16 @@ the emulator to each write's cycle and write the register. That is what `host/si
      feedback endpoint that tells the host the rate to send; supporting them means reading that endpoint too.
      C-Media CM108/CM119-class sticks are adaptive. Check the endpoint descriptor's `bmAttributes` sync bits
      (bits 3-2: 01 async, 10 adaptive, 11 sync) on a computer before buying more than one.
+   * **The owner's dongle** (MOSWAG USB to 3.5 mm adapter; `lsusb -v` on a Pi, 2026-11-08): `0020:0b21` "AB13X USB
+     Audio" (a Bluetrum AB13x chip), **full speed**, UAC1. Playback: interface 2, alternate setting 1, endpoint
+     `0x03` OUT, isochronous, **synchronous**, `bInterval` 1 (every frame), `wMaxPacketSize` 384, one format only:
+     16-bit stereo PCM at **48000 Hz** (`tSamFreq` has a single entry, so SET_CUR on the rate is likely unnecessary).
+     Also a capture interface (1, endpoint `0x83` IN) and a HID interface (2 interrupt endpoints, the buttons),
+     which the driver leaves alone. A synchronous sink takes its sample clock from the start-of-frame, so it wants
+     exactly 48 frames (192 bytes) every 1 ms frame, on the Teensy's crystal. The snoop timeline already runs on
+     that crystal (C64 cycles are counted from the Teensy's cycle counter at the nominal phi2), so rendering 1 ms
+     of that timeline gives exactly 48 samples a frame: no rate matching at all. The real C64 crystal's offset
+     (~100 ppm) only shifts where writes land by that much, which is inaudible.
 4. **Reads.** Out of scope here. A C64 with no SID still floats on `$D419-$D41C` (paddles, `$D41B` random).
    Answering those means driving the data bus on reads without a chip select, which is a separate, riskier change.
 
