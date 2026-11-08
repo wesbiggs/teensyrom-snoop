@@ -187,7 +187,7 @@ class LivePlayer:
     AUTO_UP, AUTO_DOWN = 0.05, 0.010   # how fast the latency may move, seconds per second
     MAX_STEP = 4           # samples dropped or repeated per sound card callback at most (4 per 256: 15.6 ms/s at 48 kHz)
 
-    def __init__(self, renderer: SidRenderer, latency=None, buffer=0.03, now=time.monotonic):
+    def __init__(self, renderer: SidRenderer, latency=None, buffer=0.03, now=time.monotonic, trim_start=True):
         """latency None: automatic, from how late frames arrive (99th percentile of the last
         AUTO_WINDOW seconds plus AUTO_MARGIN, moved at most AUTO_UP / AUTO_DOWN per second, so the
         sample-level drift correction absorbs the change)."""
@@ -199,6 +199,7 @@ class LivePlayer:
         self.delays = collections.deque()   # (wall, seconds a frame's oldest write had waited when it arrived)
         self.last_adjust = None
         self.target = int(buffer * renderer.rate)
+        self.trim_start = trim_start        # False: keep the backlog before playing (recording, no sound card)
         self.fifo = collections.deque()
         self.fifo_len = 0
         self.lock = threading.Lock()
@@ -209,11 +210,12 @@ class LivePlayer:
         self.last = np.zeros(2 if renderer.stereo else 1, dtype=np.int16)
 
     def feed(self, frame):
-        with self.lock:
+        arrived = self.now()   # before the work below: HELLO's emulator reset runs 1.2 s of warm-up, which
+        with self.lock:        # took ~0.36 s on a Mac, and C64 time 0 marked after it put "now" that far behind
             if isinstance(frame, sp.Hello):
                 self.r.push(frame)
                 self.clock = LiveClock(frame.phi2_hz, now=self.now)
-                self.clock.seen(0)
+                self.clock.seen(0, arrived)
                 self.fifo.clear()
                 self.fifo_len = 0
                 self.started = False
@@ -262,7 +264,12 @@ class LivePlayer:
             if target <= self.r.cursor:
                 return
             behind = (target - self.r.cursor) / self.r.phi2
-            if behind > 1.0:                  # a stall (or the start): jump, keep the state right
+            keep = int(self.target / self.r.rate * self.r.phi2)   # the FIFO's target, in C64 cycles
+            if self.trim_start and not self.started and target - self.r.cursor > keep:
+                # before playing, render no more than the FIFO holds: what is older (the time HELLO's
+                # emulator reset took, ~0.36 s on a Mac) would only sit in the FIFO as extra delay
+                self.r.skip_to(target - keep)
+            elif behind > 1.0:                # a stall: jump, keep the state right
                 self.r.skip_to(target - int(0.2 * self.r.phi2))
             s = self.r.render_to(target)
             if len(s):

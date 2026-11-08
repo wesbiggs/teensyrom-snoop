@@ -88,7 +88,7 @@ def main():
     if not ok:
         sys.exit(1)
 
-    player = sidplay.LivePlayer(sidplay.SidRenderer(**kw), latency=a.latency, buffer=a.buffer)
+    player = sidplay.LivePlayer(sidplay.SidRenderer(**kw), latency=a.latency, buffer=a.buffer, trim_start=not a.no_play)
     recorded = []
     took = [0, None, None]      # samples the sound card took, first and last callback (monotonic)
     stop = threading.Event()

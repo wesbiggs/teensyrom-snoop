@@ -167,6 +167,36 @@ class Live(unittest.TestCase):
         self.assertLess(p.dropped + p.repeated, 0.006 * 6 * RATE)
 
 
+    def test_slow_hello_reset_does_not_push_now_back(self):
+        """HELLO resets the emulator, whose warm-up takes real time (~0.36 s on a Mac).  C64 time 0 is when HELLO
+        arrived, not when the reset ended: marked after it, the first STATUS moved "now" forward by the warm-up,
+        that much audio was rendered at once and dropped over the next ~25 s (17425 samples on hardware,
+        menu idle: no writes, one STATUS a second)."""
+        ft = FakeTime()
+        r = sidplay.SidRenderer(bases=[0xD400], sample_rate=RATE)
+        make = r._make
+
+        def slow_make(phi2):
+            make(phi2)
+            ft.t += 0.36
+        r._make = slow_make
+        p = sidplay.LivePlayer(r, now=ft)
+        start = ft.t
+        p.feed(sp.Hello(sp.PROTO_VERSION, sp.PHI2_NTSC, 816_000_000, 0, [(0xD400, 0xD41C)]))
+        pending = [(start + k + 0.002, sp.Status(1, int(k * sp.PHI2_NTSC), 0, 0, 0, 0)) for k in range(1, 12)]
+        t_next_cb = ft.t                                   # the sound card already runs (trsid starts it first)
+        while ft.t < start + 12:
+            ft.t += 0.001
+            while pending and pending[0][0] <= ft.t:
+                p.feed(pending.pop(0)[1])
+            p.pump()
+            while t_next_cb <= ft.t:
+                p.fill(256)
+                t_next_cb += 256 / RATE
+        self.assertLess(p.dropped + p.repeated, 300)      # was 8000+ in 12 s
+        self.assertEqual(p.underruns, 0)
+
+
 @unittest.skipUnless(HAVE, "pyresidfp and numpy not installed")
 class AutoLatency(unittest.TestCase):
     def run_link(self, jitter, seconds=12.0, spikes=0.0):
