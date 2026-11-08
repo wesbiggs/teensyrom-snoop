@@ -24,6 +24,28 @@ test-fw: | build/inc/snoop
 	./build/fw_host
 	$(PYTHON) -m unittest -v tests/test_fw.py
 
+# the SID emulator in the glue, against reSID 0.16 (GPL: fetched, never committed). Skipped without
+# build/resid, which `make resid` fetches.
+resid:
+	$(PYTHON) tools/fetch_resid.py --dest build/resid
+
+RESID_SRC = $(wildcard build/resid/*.cpp)
+RESID_OBJ = $(patsubst build/resid/%.cpp,build/resid-obj/%.o,$(RESID_SRC))
+build/resid-obj/%.o: build/resid/%.cpp
+	@mkdir -p build/resid-obj
+	$(CXX) -std=gnu++17 -O2 -w -c $< -o $@
+
+ifeq ($(RESID_SRC),)
+test-sid:
+	@echo "test-sid: skipped (no build/resid: make resid)"
+else
+test-sid: $(RESID_OBJ) | build/inc/snoop
+	$(CXX) -std=gnu++17 -O2 -Wall -Wextra -Werror -Ibuild/inc -isystem build/resid -DSNOOP_RESID_H='"sid.h"' \
+	  -o build/fw_host_sid tests/fw_host/main.cpp $(RESID_OBJ)
+	./build/fw_host_sid
+	$(PYTHON) -m unittest -v tests/test_fw.py
+endif
+
 test-core: build/libsnoop.so
 	$(PYTHON) -m unittest -v tests/test_core.py
 
@@ -36,7 +58,7 @@ TEENSYROM ?= ../../3p/TeensyROM
 test-e2e: build/libsnoop.so
 	TEENSYROM=$(TEENSYROM) $(PYTHON) -m unittest -v tests/test_e2e.py
 
-test: check-cxx test-core test-fw test-player test-e2e
+test: check-cxx test-core test-fw test-sid test-player test-e2e
 
 # the live path in real time against tools/fake_tr.py (timing-dependent: not in make test)
 test-live: demo
@@ -53,4 +75,4 @@ demo: build/libsnoop.so
 clean:
 	rm -rf build
 
-.PHONY: all check-cxx test-core test-fw test-player test-e2e test test-live demo clean
+.PHONY: all resid test-sid check-cxx test-core test-fw test-player test-e2e test test-live demo clean

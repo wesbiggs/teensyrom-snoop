@@ -8,6 +8,7 @@
 #include <deque>
 #include <vector>
 #include <string>
+#include <algorithm>
 
 #define FLASHMEM
 #define FASTRUN
@@ -144,9 +145,25 @@ static void Command(Stream *ch, const std::vector<uint8_t> &bytes)
    SnoopCommand();
 }
 
+#ifdef SNOOP_RESID_H
+// What the SID consumer did, in order: a write (a < 0x10000) or the end of a loop pass's emulation (a = 0x10000).
+// reSID's filter integrates in steps of up to 8 cycles, so the same span split differently gives slightly
+// different samples: the reference render replays these split points to compare exactly.
+struct SidEvent { uint64_t t; uint32_t a; uint8_t d; };
+static std::vector<SidEvent> SidLog;
+static bool SidLogging = false;
+#endif
+
 static void Loop(int n = 1)
 {
-   for (int i = 0; i < n; i++) { NowUs += 500; SnoopService(); }
+   for (int i = 0; i < n; i++)
+   {
+      NowUs += 500;
+      SnoopService();
+#ifdef SNOOP_RESID_H
+      if (SidLogging) SidLog.push_back({SnoopSidAt, 0x10000, 0});
+#endif
+   }
 }
 
 static int Fails = 0;
@@ -303,6 +320,72 @@ int main()
       Command(&SnoopClient, {0x64, 0x53, 0});
       CHECK(!SnoopState.running);
    }
+
+#ifdef SNOOP_RESID_H
+   // 9. the SID emulator (a tree with reSID; make test-sid): each write applied on its cycle, the run
+   //    emulated up to "now", the samples equal to reSID driven directly with the same writes
+   {
+      static std::vector<short> Got;
+      SnoopSidSink = [](const short *p, int n) { Got.insert(Got.end(), p, p + n); };
+      IO1[wRegVid_TOD_Clks] = 0;
+      Stream Sid;
+      Command(&Sid, {0x64, 0x53, 1, 1, 0x00, 0xD4, 0x1C, 0xD4, 0, 0});
+      CHECK(SnoopState.on_write == SnoopSidWrite);
+      SnoopState.on_write = [](void *c, uint64_t t, uint16_t a, uint8_t d) { SidLog.push_back({t, a, d}); SnoopSidWrite(c, t, a, d); };
+      SidLogging = true;
+      const std::vector<std::pair<uint16_t, uint8_t>> Tune = {
+         {0xD418, 0x0F}, {0xD405, 0x09}, {0xD406, 0xF0}, {0xD400, 0xD6}, {0xD401, 0x1C}, {0xD404, 0x11},
+         {0xD402, 0x00}, {0xD403, 0x08}, {0xD404, 0x41}, {0xD401, 0x0E}, {0xD417, 0xF1}, {0xD416, 0x40},
+         {0xD418, 0x1F}, {0xD404, 0x40}, {0xD41A, 0x55}, {0xD020, 0x01}};   // $D41A: read-only; $D020: not watched
+      size_t Extra = 0;
+      for (size_t k = 0; k < Tune.size(); k++)
+      {
+         Cycle(Tune[k].first, false, Tune[k].second);
+         if (k % 3 == 2 && Tune[k].first < 0xD41C) { Cycle(Tune[k].first + 1, false, 0x00); Extra++; }   // 1 cycle apart
+         ARM_DWT_CYCCNT += 609u * (2000u + 997u * (uint32_t)k);   // the bus idles: up to ~17000 cycles
+         Loop(1 + (int)(k % 4));
+      }
+      Loop(20);
+      Command(&Sid, {0x64, 0x53, 0});
+      Dump("build/fw_sid.bin", Sid);
+      // reSID driven directly with what the consumer was given, to the time it emulated
+      reSID::SID Ref;
+      Ref.set_chip_model(reSID::MOS6581);
+      Ref.set_sampling_parameters(SnoopPhi2Hz(), reSID::SAMPLE_FAST, SnoopSidRate);
+      Ref.reset();
+      std::vector<short> Want;
+      short Buf[256];
+      uint64_t At = 0;
+      auto ClockTo = [&](uint64_t t) {
+         reSID::cycle_count d = (reSID::cycle_count)(t - At);
+         while (d > 0) { int n = Ref.clock(d, Buf, 256); Want.insert(Want.end(), Buf, Buf + n); }
+         At = t;
+      };
+      SidLogging = false;
+      size_t Writes = 0;
+      for (const SidEvent &e : SidLog)
+      {
+         if (e.a == 0x10000) { ClockTo(e.t); continue; }
+         Writes++;
+         if (e.a - 0xD400u < 0x20u) { ClockTo(e.t); Ref.write(e.a & 0x1F, e.d); }
+      }
+      ClockTo(SnoopSidAt);
+      int Peak = 0;
+      for (short v : Got) Peak = std::max(Peak, v < 0 ? -(int)v : (int)v);
+      CHECK(Writes == Tune.size() - 1 + Extra);   // all but $D020 ($D41A is in the range: reSID ignores it)
+      if (Got != Want)
+      {
+         size_t i = 0;
+         while (i < Got.size() && i < Want.size() && Got[i] == Want[i]) i++;
+         fprintf(stderr, "SID: got %zu samples, want %zu, first difference at %zu\n", Got.size(), Want.size(), i);
+      }
+      CHECK(Got.size() > 48000u / 10);
+      CHECK(Got == Want);
+      CHECK(Peak > 1000);
+      printf("fw_host: SID: %zu writes, %zu samples (%.2f s), peak %d, equal to a direct render: %s\n",
+             Writes, Got.size(), Got.size() / 48000.0, Peak, Got == Want ? "yes" : "NO");
+   }
+#endif
 
    if (Fails) { fprintf(stderr, "fw_host: %d failed\n", Fails); return 1; }
    printf("fw_host: ok\n");

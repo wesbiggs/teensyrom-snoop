@@ -38,8 +38,11 @@ the emulator to each write's cycle and write the register. That is what `host/si
      816 MHz (TeensyROM sets it at boot). It busy-waits to the data setup and hold times, so much of each 1 µs cycle is gone.
      Measure first, with the menu showing and with a game running (step 1 below: the main-loop probe in 0.9-sn6).
      Then compare with reSID's cost on an M7 at 48 kHz (reported in the tens of percent of a slower M4 core).
-   * **RAM.** reSID's wave tables are about 4 x 4 KB plus filter tables. They go in flash (`PROGMEM`) or RAM2,
-     never RAM1 (66 KB free for locals with vdrive).
+   * **RAM.** reSID 0.16's eight combined-waveform tables are writable `unsigned int` arrays (8 x 16 KB):
+     `tools/fetch_resid.py` makes them 8-bit constants in flash (`PROGMEM`, 8 x 4 KB). The `SID` object holds 16 KB
+     of filter tables and goes on the heap (RAM2). RAM1 (66 KB free for locals with vdrive) only gets reSID's code.
+   * **Licence.** reSID is GPL-2.0-or-later: it is fetched at build time, never committed here, and only an image
+     built with it (`-snNr`) is GPL (owner, 2026-11-07).
 2. **USB audio host driver (new code).** TeensyROM's bundled USBHost_t36 has no isochronous transfers
    (`ehci.cpp:1259`: "TODO: skip past iTD, siTD when/if we support isochronous") and no audio class driver.
    Audio streams only over isochronous endpoints, so this is the main new work:
@@ -77,7 +80,13 @@ the emulator to each write's cycle and write the register. That is what `host/si
    lower-priority interrupt with phi2 nested in it, no late phi2), so the audio path needs a buffer of well over
    41 us, which a few ms is. Step 2 must fit reSID at 48 kHz in well under 353 M cycles/s, with room for the rest of
    `loop()` and the USB driver.
-2. Port `render_to` with reSID into a `snoop` consumer. Output to a buffer only, and time it.
+2. Port `render_to` with reSID into a `snoop` consumer. Output to a buffer only, and time it. **In 0.9-sn7r:**
+   the core passes every captured write with its exact C64 time to a consumer (`snoop_t.on_write`); the glue clocks
+   one reSID 0.16 (6581, 48 kHz, `SAMPLE_FAST`) to each `$D400-$D41F` write and then to "now" on every loop pass,
+   and times it with the cycle counter. STATUS v5 carries the cost (`emu_cyc` for `emu_c64`); `trsid.py --isr`
+   prints reSID's share of the time. On the host, the glue's samples equal reSID driven directly with the same
+   writes (`make resid test-sid`). Not yet on hardware. It must stay well below 100% of the time with Ms. Pac-Man
+   running, and leave room for the USB driver.
 3. Independently of 2: the UAC1 host driver and siTD support, tested with a sine wave on one adaptive dongle,
    and with Ms. Pac-Man running to confirm the host port leaves `isrPHI2` alone (`trsid.py --isr`'s late counts over TCP).
 4. Connect them: the emulator renders into the siTD ring, samples per frame following phi2.

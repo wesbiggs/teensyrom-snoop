@@ -157,6 +157,13 @@ part before `-sn1` (`v0.9`). The menu, the serial banner and the file name show 
 `tools/make_tr_patch.py /path/to/TeensyROM` regenerates the patch after a change to `core/` or
 `firmware/`. It works from `git archive HEAD` of that checkout and asserts on the upstream text it edits.
 
+**With the SID emulator (phase 2, GPL).** After applying the patch and before stamping, run
+`python3 ../teensyrom-snoop/tools/fetch_resid.py --tree .`. It downloads reSID 0.16 (Dag Lem, GPL-2.0-or-later)
+at a pinned commit into `Source/Teensy/src/reSID/` and moves its wave tables to flash. The glue sees it there and
+builds the emulator in; the stamp then reads `0.9-sn7r`. That image is GPL-2.0-or-later as a whole: whoever
+distributes it must offer its source. reSID is never committed to this repository, and the plain build has none
+of it.
+
 ## Tests
 
 `make test`:
@@ -165,6 +172,8 @@ part before `-sn1` (`v0.9`). The menu, the serial banner and the file name show 
   stamp jitter and 32-bit wrap, ring and output overflow, and a 20000-write fuzz with text mixed into the stream.
 * `tests/fw_host` + `tests/test_fw.py`: the firmware glue against host stubs. Covers serial and TCP runs,
   replacing a running capture, TCP disconnect, DTR drop, refusals and NTSC.
+* `make test-sid` (in `make test` once `make resid` has fetched reSID into `build/resid`): the glue with the SID
+  emulator, its samples compared with reSID driven directly with the same writes and split points.
 * `tests/test_sidplay.py`: the renderer (pitch, sub-sample timing, stereo, 8580/NTSC) and the live
   player under late, jittery frames and 0.5 % sound-card drift.
 * `tests/test_e2e.py`: real tunes end to end (needs `pip install py65 pyresidfp numpy` and a TeensyROM checkout, `TEENSYROM=`).
@@ -199,6 +208,9 @@ the registers `isrPHI2` saves (see the script for the repositories it needs).
 9. **The player uses reSIDfp through pyresidfp (GPL-2.0+)** as a run-time dependency, not shipped.
    The model defaults to 6581 because the stream does not say which chip (the C64 has none).
 10. **No licence file yet:** that is the owner's call. The TeensyROM is MIT, and the patch adds files under it.
+11. **reSID on the Teensy is fetched at build time, never committed** (owner, 2026-11-07): `tools/fetch_resid.py`.
+    reSID 0.16, not 1.0: 1.0 builds large tables in RAM at run time; 0.16's wave tables are constants that can sit
+    in flash. Only an image built with it (`-snNr`) is GPL.
 
 ## Next
 
@@ -211,3 +223,7 @@ the registers `isrPHI2` saves (see the script for the repositories it needs).
   with no phi2 interrupt >250 ns late, so it was a lower-priority interrupt (Ethernet, USB host) with phi2 running
   inside it. **Ms. Pac-Man running (joystick in use), TCP, 42 s: 43.3% free**, no interrupt >250 ns late. The
   TeensyROM runs at 816 MHz (HELLO's cpu_hz), so that leaves ~497 M cycles/s idle and **~353 M cycles/s** in the game.
+  Step 2, reSID on the TeensyROM with its output going nowhere, is in 0.9-sn7r (a build with `fetch_resid.py`; not
+  yet on hardware): one 6581 at 48 kHz in fast sampling, clocked to each captured `$D4xx` write on its cycle and to
+  "now" on every loop pass. `trsid.py --isr` prints its share of the time each second and on average (STATUS v5).
+  On the host its output equals reSID driven directly with the same writes, sample for sample (`make resid test`).

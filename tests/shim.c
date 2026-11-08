@@ -56,3 +56,19 @@ uint32_t sim_probe(uint32_t window, uint32_t step, uint32_t every, uint32_t isr,
    fake_step = step; fake_every = every; fake_isr = isr; fake_n = 0; fake_once_at = once_at; fake_once = once;
    return snoop_cpu_probe(&st, fake_read, window);
 }
+
+/* the per-write consumer hook: records what it is given */
+static uint64_t cons_t[4096];
+static uint16_t cons_a[4096];
+static uint8_t cons_d[4096];
+static int cons_n;
+static void cons_rec(void *ctx, uint64_t t, uint16_t a, uint8_t d)
+{
+   (void)ctx;
+   if (cons_n < 4096) { cons_t[cons_n] = t; cons_a[cons_n] = a; cons_d[cons_n] = d; cons_n++; }
+}
+void sim_consumer(int on) { st.on_write = on ? cons_rec : 0; cons_n = 0; }
+int sim_cons_n(void) { return cons_n; }
+uint64_t sim_cons_t(int i) { return cons_t[i]; }
+int sim_cons_ad(int i) { return cons_a[i] << 8 | cons_d[i]; }
+void sim_emu(uint32_t cyc, uint32_t c64) { st.emu_cyc += cyc; st.emu_c64 += c64; }

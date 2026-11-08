@@ -6,7 +6,8 @@
 Run after `git apply firmware/teensyrom-snoop.patch` (and the teensyrom-vdrive patch, if used).
 The number after "sn" is firmware/SNREV. Whatever version is there keeps its stamp, so with
 vdrive it becomes "0.9.0.45-sn1". A "-snN" from an earlier run is replaced, so running it twice
-is harmless. The menu shows the result at the top ("TeensyROM+ v0.9-sn1"), and the hex is named
+is harmless. A tree with reSID in src/reSID/ (tools/fetch_resid.py, run before this) gets "-snNr": its
+image includes the GPL SID emulator. The menu shows the result at the top ("TeensyROM+ v0.9-sn1"), and the hex is named
 after it (TeensyROM+_0.9-sn1_full.hex).
 
 It is a separate step, not part of the patch, because teensyrom-vdrive's patch rewrites the same
@@ -35,8 +36,10 @@ def main():
         sys.exit(f"{DEFS}: no #define TRVersion line")
     if "FeatWriteSnoop" not in open(os.path.join(sys.argv[1], "Source/Teensy/TeensyROM.h")).read():
         sys.exit("the snoop patch is not applied to this tree (no FeatWriteSnoop in TeensyROM.h)")
-    base = re.sub(r"-sn\d+$", "", m.group(2))
-    version = f"{base}-sn{rev}"
+    base = re.sub(r"-sn\d+r?$", "", m.group(2))
+    # "r": the tree has reSID (tools/fetch_resid.py), so the image is GPL-2.0-or-later as a whole
+    resid = os.path.isfile(os.path.join(sys.argv[1], "Source/Teensy/src/reSID/sid.h"))
+    version = f"{base}-sn{rev}{'r' if resid else ''}"
     text = text[:m.start()] + m.group(1) + version + m.group(3) + text[m.end():]
     with open(path, "w", newline="") as fh:
         fh.write(text)

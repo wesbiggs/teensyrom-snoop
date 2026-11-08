@@ -114,7 +114,7 @@ class Printer:
         elif isinstance(f, sp.Status):
             print(f"# status t={f.time} writes={f.writes} dropped={f.dropped} out_dropped={f.out_dropped} "
                   f"ring_hiwater={f.ring_hiwater} late_isr={f.late} >250ns={f.late250} >1us={f.late1000} "
-                  f"{f.probe_text(self.cpu_hz)}".rstrip())
+                  f"{f.probe_text(self.cpu_hz)} {f.emu_text(self.cpu_hz, self.phi2)}".rstrip())
         elif isinstance(f, sp.Bye):
             print(f"# bye ({f.reason_text})")
         sys.stdout.flush()

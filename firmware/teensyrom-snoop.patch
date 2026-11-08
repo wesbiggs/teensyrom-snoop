@@ -111,10 +111,10 @@ index 0000000..0555a91
 +#endif
 diff --git a/Source/Teensy/WriteSnoop.ino b/Source/Teensy/WriteSnoop.ino
 new file mode 100644
-index 0000000..24186f4
+index 0000000..797f30b
 --- /dev/null
 +++ b/Source/Teensy/WriteSnoop.ino
-@@ -0,0 +1,252 @@
+@@ -0,0 +1,317 @@
 +// teensyrom-snoop: the main-loop half.  Command 0x6453 from the USB serial or TCP channel, and
 +// SnoopService() from loop().  Protocol: docs/PROTOCOL.md in teensyrom-snoop.
 +
@@ -177,6 +177,65 @@ index 0000000..24186f4
 +{
 +   return (IO1[wRegVid_TOD_Clks] & rvtcNTSC) ? 1022727 : 985248;
 +}
++
++// The SID emulator (0.9-sn7, phase 2 step 2, docs/USB-AUDIO.md): only in a tree that has reSID in src/reSID/
++// (tools/fetch_resid.py; GPL-2.0-or-later, so such an image is GPL as a whole).  One 6581 at 48 kHz, fast
++// sampling, clocked to each captured write to $D400-$D41F on its exact C64 cycle and then to "now" on every
++// loop pass.  The output goes nowhere yet: this step measures the cost, which STATUS (protocol 5) reports as
++// emu_cyc (CPU cycles taken, interrupts included) for emu_c64 (C64 cycles emulated).
++#if !defined(SNOOP_RESID_H) && defined(__has_include)
++#if __has_include("src/reSID/sid.h")
++#define SNOOP_RESID_H "src/reSID/sid.h"
++#endif
++#endif
++#ifdef SNOOP_RESID_H
++#include SNOOP_RESID_H
++#define SnoopSidBase    0xD400
++#define SnoopSidRate    48000
++reSID::SID *SnoopSid = NULL;               // on the heap (RAM2): its filter tables are 16 KB
++uint64_t SnoopSidAt = 0;                   // C64 cycles emulated this run
++DMAMEM short SnoopSidBuf[256];
++void (*SnoopSidSink)(const short *Samples, int n) = NULL;   // where the samples go (the host test only, for now)
++
++FLASHMEM void SnoopSidClockTo(uint64_t Time)
++{
++   if (SnoopSid == NULL || Time <= SnoopSidAt) return;
++   const uint64_t Span = Time - SnoopSidAt;
++   const uint32_t Start = SnoopCycles();
++   uint64_t Left = Span;
++   while (Left)
++   {
++      reSID::cycle_count d = Left > 0x40000000u ? 0x40000000 : (reSID::cycle_count)Left;
++      Left -= (uint64_t)d;
++      while (d > 0)
++      {
++         const int n = SnoopSid->clock(d, SnoopSidBuf, (int)(sizeof SnoopSidBuf / sizeof SnoopSidBuf[0]));
++         if (SnoopSidSink && n > 0) SnoopSidSink(SnoopSidBuf, n);
++      }
++   }
++   SnoopState.emu_cyc += SnoopCycles() - Start;
++   SnoopState.emu_c64 += (uint32_t)Span;
++   SnoopSidAt = Time;
++}
++
++FLASHMEM void SnoopSidWrite(void *, uint64_t Time, uint16_t Address, uint8_t Data)
++{
++   if ((uint16_t)(Address - SnoopSidBase) >= 0x20) return;
++   SnoopSidClockTo(Time);
++   SnoopSid->write(Address & 0x1F, Data);
++}
++
++FLASHMEM void SnoopSidStart()
++{
++   if (SnoopSid == NULL) SnoopSid = new reSID::SID();
++   SnoopSid->set_chip_model(reSID::MOS6581);
++   SnoopSid->set_sampling_parameters(SnoopPhi2Hz(), reSID::SAMPLE_FAST, SnoopSidRate);
++   SnoopSid->reset();
++   SnoopSidAt = 0;
++   SnoopState.on_write = SnoopSidWrite;
++   SnoopState.on_write_ctx = NULL;
++}
++#endif
 +
 +// Send what the FIFO holds, never more than the channel takes without blocking
 +// (EthernetClient::write busy-waits for buffer space; USB serial waits for the host).
@@ -284,6 +343,9 @@ index 0000000..24186f4
 +#endif
 +   SnoopLastSendMs = millis();
 +   SnoopLastProbeMs = SnoopLastSendMs - SnoopProbeEveryMs;   // the first probe on the next pass
++#ifdef SNOOP_RESID_H
++   SnoopSidStart();
++#endif
 +}
 +
 +#ifdef FeatTCPListen
@@ -348,6 +410,9 @@ index 0000000..24186f4
 +      return;
 +   }
 +   snoop_poll(&SnoopState, micros(), ARM_DWT_CYCCNT);
++#ifdef SNOOP_RESID_H
++   SnoopSidClockTo(SnoopState.c64_time);
++#endif
 +   const uint32_t Now = millis();
 +   if (Now - SnoopLastProbeMs >= SnoopProbeEveryMs)
 +   {
@@ -369,10 +434,10 @@ index 0000000..24186f4
 +#endif
 diff --git a/Source/Teensy/snoop/snoop.c b/Source/Teensy/snoop/snoop.c
 new file mode 100644
-index 0000000..604ff25
+index 0000000..b722004
 --- /dev/null
 +++ b/Source/Teensy/snoop/snoop.c
-@@ -0,0 +1,358 @@
+@@ -0,0 +1,363 @@
 +/* teensyrom-snoop: main-loop side.  See snoop.h and docs/PROTOCOL.md. */
 +#include "snoop.h"
 +#include <string.h>
@@ -581,7 +646,7 @@ index 0000000..604ff25
 +
 +SNOOP_COLD void snoop_status(snoop_t *s)
 +{
-+   uint8_t p[1 + 2 + 10 + 4 + 4 + 2 + 4 + 3 * 4 + 4 + 4 + 2 + 4];
++   uint8_t p[1 + 2 + 10 + 4 + 4 + 2 + 4 + 3 * 4 + 4 + 4 + 2 + 4 + 4 + 4];
 +   size_t n = 0;
 +   frame_close(s);
 +   p[n++] = SNOOP_F_STATUS;
@@ -596,7 +661,10 @@ index 0000000..604ff25
 +   n += put_u32(p + n, s->probe_free);
 +   n += put_u16(p + n, s->probe_worst);
 +   n += put_u32(p + n, s->probe_stall);
++   n += put_u32(p + n, s->emu_cyc);
++   n += put_u32(p + n, s->emu_c64);
 +   emit(s, p, n);
++   s->emu_cyc = s->emu_c64 = 0;
 +   s->ring_hiwater = 0;
 +   s->probe_cyc = s->probe_free = s->probe_stall = 0;
 +   s->probe_worst = 1000;
@@ -664,6 +732,7 @@ index 0000000..604ff25
 +   s->writes = 0;
 +   s->probe_cyc = s->probe_free = s->probe_stall = 0;
 +   s->probe_worst = 1000;
++   s->emu_cyc = s->emu_c64 = 0;
 +   s->last_status_us = now_us;
 +
 +   uint8_t p[1 + 1 + 4 + 4 + 1 + 1 + 4 * SNOOP_MAX_RANGES];
@@ -707,6 +776,7 @@ index 0000000..604ff25
 +      hot->tail = tail;
 +      advance(s, e.stamp);
 +      add_write(s, e.addr, e.data, s->c64_time, now_us);
++      if (s->on_write) s->on_write(s->on_write_ctx, s->c64_time, e.addr, e.data);
 +      taken++;
 +   }
 +   s->writes += taken;
@@ -733,10 +803,10 @@ index 0000000..604ff25
 +}
 diff --git a/Source/Teensy/snoop/snoop.h b/Source/Teensy/snoop/snoop.h
 new file mode 100644
-index 0000000..9c2018a
+index 0000000..b948cbd
 --- /dev/null
 +++ b/Source/Teensy/snoop/snoop.h
-@@ -0,0 +1,229 @@
+@@ -0,0 +1,237 @@
 +/* teensyrom-snoop: capture C64 bus writes to chosen addresses and stream them.
 + *
 + * Portable C99, also compiled as C++ by the TeensyROM firmware (keep it C++-clean).
@@ -761,7 +831,7 @@ index 0000000..9c2018a
 +extern "C" {
 +#endif
 +
-+#define SNOOP_PROTO_VERSION 4
++#define SNOOP_PROTO_VERSION 5
 +
 +#ifndef SNOOP_MAX_RANGES
 +#define SNOOP_MAX_RANGES   16     /* address ranges per start command */
@@ -914,6 +984,14 @@ index 0000000..9c2018a
 +   uint32_t       probe_free;     /* ...of which the main loop had (no interrupt running) */
 +   uint16_t       probe_worst;    /* lowest free share of a single probe, per mille (1000 = no probe yet) */
 +   uint32_t       probe_stall;    /* longest single interruption, CPU cycles */
++
++   /* A consumer of the writes (phase 2: an emulator on the Teensy).  snoop_poll calls on_write for every
++    * captured write, in order, with its exact C64 time; snoop_init clears it, snoop_start leaves it.  The glue
++    * adds what the consumer cost to emu_cyc / emu_c64, which the next STATUS reports and clears (version 5). */
++   void         (*on_write)(void *ctx, uint64_t time, uint16_t addr, uint8_t data);
++   void          *on_write_ctx;
++   uint32_t       emu_cyc;        /* CPU cycles the consumer took (wall time: interrupts included) */
++   uint32_t       emu_c64;        /* C64 cycles it emulated */
 +
 +   /* output FIFO */
 +   uint8_t        out[SNOOP_OUT_SIZE];

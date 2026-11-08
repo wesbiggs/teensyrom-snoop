@@ -22,7 +22,7 @@
 extern "C" {
 #endif
 
-#define SNOOP_PROTO_VERSION 4
+#define SNOOP_PROTO_VERSION 5
 
 #ifndef SNOOP_MAX_RANGES
 #define SNOOP_MAX_RANGES   16     /* address ranges per start command */
@@ -175,6 +175,14 @@ typedef struct {
    uint32_t       probe_free;     /* ...of which the main loop had (no interrupt running) */
    uint16_t       probe_worst;    /* lowest free share of a single probe, per mille (1000 = no probe yet) */
    uint32_t       probe_stall;    /* longest single interruption, CPU cycles */
+
+   /* A consumer of the writes (phase 2: an emulator on the Teensy).  snoop_poll calls on_write for every
+    * captured write, in order, with its exact C64 time; snoop_init clears it, snoop_start leaves it.  The glue
+    * adds what the consumer cost to emu_cyc / emu_c64, which the next STATUS reports and clears (version 5). */
+   void         (*on_write)(void *ctx, uint64_t time, uint16_t addr, uint8_t data);
+   void          *on_write_ctx;
+   uint32_t       emu_cyc;        /* CPU cycles the consumer took (wall time: interrupts included) */
+   uint32_t       emu_c64;        /* C64 cycles it emulated */
 
    /* output FIFO */
    uint8_t        out[SNOOP_OUT_SIZE];

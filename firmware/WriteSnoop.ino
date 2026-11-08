@@ -61,6 +61,65 @@ FLASHMEM uint32_t SnoopPhi2Hz()
    return (IO1[wRegVid_TOD_Clks] & rvtcNTSC) ? 1022727 : 985248;
 }
 
+// The SID emulator (0.9-sn7, phase 2 step 2, docs/USB-AUDIO.md): only in a tree that has reSID in src/reSID/
+// (tools/fetch_resid.py; GPL-2.0-or-later, so such an image is GPL as a whole).  One 6581 at 48 kHz, fast
+// sampling, clocked to each captured write to $D400-$D41F on its exact C64 cycle and then to "now" on every
+// loop pass.  The output goes nowhere yet: this step measures the cost, which STATUS (protocol 5) reports as
+// emu_cyc (CPU cycles taken, interrupts included) for emu_c64 (C64 cycles emulated).
+#if !defined(SNOOP_RESID_H) && defined(__has_include)
+#if __has_include("src/reSID/sid.h")
+#define SNOOP_RESID_H "src/reSID/sid.h"
+#endif
+#endif
+#ifdef SNOOP_RESID_H
+#include SNOOP_RESID_H
+#define SnoopSidBase    0xD400
+#define SnoopSidRate    48000
+reSID::SID *SnoopSid = NULL;               // on the heap (RAM2): its filter tables are 16 KB
+uint64_t SnoopSidAt = 0;                   // C64 cycles emulated this run
+DMAMEM short SnoopSidBuf[256];
+void (*SnoopSidSink)(const short *Samples, int n) = NULL;   // where the samples go (the host test only, for now)
+
+FLASHMEM void SnoopSidClockTo(uint64_t Time)
+{
+   if (SnoopSid == NULL || Time <= SnoopSidAt) return;
+   const uint64_t Span = Time - SnoopSidAt;
+   const uint32_t Start = SnoopCycles();
+   uint64_t Left = Span;
+   while (Left)
+   {
+      reSID::cycle_count d = Left > 0x40000000u ? 0x40000000 : (reSID::cycle_count)Left;
+      Left -= (uint64_t)d;
+      while (d > 0)
+      {
+         const int n = SnoopSid->clock(d, SnoopSidBuf, (int)(sizeof SnoopSidBuf / sizeof SnoopSidBuf[0]));
+         if (SnoopSidSink && n > 0) SnoopSidSink(SnoopSidBuf, n);
+      }
+   }
+   SnoopState.emu_cyc += SnoopCycles() - Start;
+   SnoopState.emu_c64 += (uint32_t)Span;
+   SnoopSidAt = Time;
+}
+
+FLASHMEM void SnoopSidWrite(void *, uint64_t Time, uint16_t Address, uint8_t Data)
+{
+   if ((uint16_t)(Address - SnoopSidBase) >= 0x20) return;
+   SnoopSidClockTo(Time);
+   SnoopSid->write(Address & 0x1F, Data);
+}
+
+FLASHMEM void SnoopSidStart()
+{
+   if (SnoopSid == NULL) SnoopSid = new reSID::SID();
+   SnoopSid->set_chip_model(reSID::MOS6581);
+   SnoopSid->set_sampling_parameters(SnoopPhi2Hz(), reSID::SAMPLE_FAST, SnoopSidRate);
+   SnoopSid->reset();
+   SnoopSidAt = 0;
+   SnoopState.on_write = SnoopSidWrite;
+   SnoopState.on_write_ctx = NULL;
+}
+#endif
+
 // Send what the FIFO holds, never more than the channel takes without blocking
 // (EthernetClient::write busy-waits for buffer space; USB serial waits for the host).
 FLASHMEM void SnoopSend(Stream *Out)
@@ -167,6 +226,9 @@ FLASHMEM void SnoopCommand()
 #endif
    SnoopLastSendMs = millis();
    SnoopLastProbeMs = SnoopLastSendMs - SnoopProbeEveryMs;   // the first probe on the next pass
+#ifdef SNOOP_RESID_H
+   SnoopSidStart();
+#endif
 }
 
 #ifdef FeatTCPListen
@@ -231,6 +293,9 @@ FLASHMEM void SnoopService()
       return;
    }
    snoop_poll(&SnoopState, micros(), ARM_DWT_CYCCNT);
+#ifdef SNOOP_RESID_H
+   SnoopSidClockTo(SnoopState.c64_time);
+#endif
    const uint32_t Now = millis();
    if (Now - SnoopLastProbeMs >= SnoopProbeEveryMs)
    {

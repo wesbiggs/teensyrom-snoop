@@ -1,4 +1,4 @@
-# teensyrom-snoop protocol (version 4)
+# teensyrom-snoop protocol (version 5)
 
 All multi-byte numbers are little-endian unless marked otherwise. `varint` is unsigned LEB128
 (7 bits per byte, low group first, high bit = more).
@@ -81,10 +81,11 @@ STATUS/BYE, so latency is a few ms.
 
 ### STATUS `03`
 
-`03 next_seq:u16 time:varint dropped:u32 out_dropped:u32 ring_hiwater:u16 writes:u32 late:u32 late250:u32 late1000:u32 probe_cyc:u32 probe_free:u32 probe_worst:u16 probe_stall:u32`
+`03 next_seq:u16 time:varint dropped:u32 out_dropped:u32 ring_hiwater:u16 writes:u32 late:u32 late250:u32 late1000:u32 probe_cyc:u32 probe_free:u32 probe_worst:u16 probe_stall:u32 emu_cyc:u32 emu_c64:u32`
 
-The three `late` counters are new in version 3, the four `probe` fields in version 4. A version 2 STATUS ends after
-`writes`, a version 3 one after `late1000`, and the decoder accepts all three.
+The three `late` counters are new in version 3, the four `probe` fields in version 4, the two `emu` fields in
+version 5. A version 2 STATUS ends after `writes`, a version 3 one after `late1000`, a version 4 one after
+`probe_stall`, and the decoder accepts all four.
 
 Once a second, on the status command, and before BYE.
 
@@ -107,6 +108,11 @@ Once a second, on the status command, and before BYE.
   (1000 when none ran), and `probe_stall` the longest single interruption in CPU cycles. Interrupts shorter than
   40 cycles count as free, so the share is an upper bound. The probe holds the TeensyROM's main loop up for
   1 ms each time (1% of the time).
+* `emu_cyc`, `emu_c64` (version 5, firmware 0.9-sn7r: a build with reSID, `tools/fetch_resid.py`), **since the last
+  STATUS**: the SID emulator on the TeensyROM took `emu_cyc` CPU cycles, measured on the wall clock (interrupts that
+  came in meanwhile included), to emulate `emu_c64` C64 cycles. `emu_cyc / cpu_hz` over `emu_c64 / phi2_hz` is the
+  share of the time it takes: it keeps up while that stays well below 1. Both are 0 in a build without reSID.
+  The emulator's output goes nowhere yet (phase 2 step 2, docs/USB-AUDIO.md).
 
 ### BYE `04`
 

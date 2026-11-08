@@ -7,7 +7,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
-PROTO_VERSION = 4
+PROTO_VERSION = 5
 
 F_HELLO, F_WRITES, F_STATUS, F_BYE = 0x01, 0x02, 0x03, 0x04
 BYE_REASONS = {0: "stopped", 1: "replaced", 2: "channel"}
@@ -125,11 +125,21 @@ class Status:
     probe_free: int = 0     # ...of which no interrupt was running
     probe_worst: int = 1000 # lowest free share of a single probe (1 ms), per mille
     probe_stall: int = 0    # longest single interruption seen by the probe, CPU cycles
+    emu_cyc: int = 0        # CPU cycles the on-Teensy emulator took since the last STATUS (version 5; 0 = none)
+    emu_c64: int = 0        # ...for this many C64 cycles of emulation
 
     @property
     def cpu_free(self):
         """Share of the CPU the interrupts left to the main loop since the last STATUS, or None."""
         return self.probe_free / self.probe_cyc if self.probe_cyc else None
+
+    def emu_text(self, cpu_hz: int = 600_000_000, phi2_hz: int = PHI2_PAL) -> str:
+        """The on-Teensy emulator's cost in words (firmware built with reSID, 0.9-sn7r+), or ''.  The share is of
+        wall time, interrupts included: the emulator keeps up while it stays well below 100%."""
+        if not self.emu_c64:
+            return ""
+        secs = self.emu_c64 / phi2_hz
+        return f"reSID {self.emu_cyc / cpu_hz / secs * 100:4.1f}% of the time"
 
     def probe_text(self, cpu_hz: int = 600_000_000) -> str:
         """The CPU probe in words, or '' when it did not run (firmware before 0.9-sn6)."""
@@ -180,14 +190,16 @@ def parse_payload(p: bytes):
         time, i = _varint(p, 3)
         dropped, out_dropped, hiw, writes = struct.unpack_from("<IIHI", p, i)
         i += 14
-        late, probe = (0, 0, 0), (0, 0, 1000, 0)
-        if len(p) in (i + 12, i + 26):             # version 3: the late counters
+        late, probe, emu = (0, 0, 0), (0, 0, 1000, 0), (0, 0)
+        if len(p) in (i + 12, i + 26, i + 34):     # version 3: the late counters
             late = struct.unpack_from("<III", p, i)
-            if len(p) == i + 26:                   # version 4: the CPU probe
+            if len(p) >= i + 26:                   # version 4: the CPU probe
                 probe = struct.unpack_from("<IIHI", p, i + 12)
+            if len(p) == i + 34:                   # version 5: the emulator's cost
+                emu = struct.unpack_from("<II", p, i + 26)
         elif len(p) != i:
             raise ValueError("STATUS length")
-        return Status(next_seq, time, dropped, out_dropped, hiw, writes, *late, *probe)
+        return Status(next_seq, time, dropped, out_dropped, hiw, writes, *late, *probe, *emu)
     if t == F_BYE:
         if len(p) != 2:
             raise ValueError("BYE length")
@@ -320,11 +332,11 @@ def writes_payload(seq: int, blocks) -> bytes:
 
 
 def status_payload(next_seq, time, dropped=0, out_dropped=0, hiwater=0, writes=0, late=(0, 0, 0),
-                   probe=(0, 0, 1000, 0)) -> bytes:
-    """probe: (probe_cyc, probe_free, probe_worst, probe_stall)."""
+                   probe=(0, 0, 1000, 0), emu=(0, 0)) -> bytes:
+    """probe: (probe_cyc, probe_free, probe_worst, probe_stall); emu: (emu_cyc, emu_c64)."""
     return (struct.pack("<BH", F_STATUS, next_seq & 0xFFFF) + put_varint(time)
             + struct.pack("<IIHI", dropped, out_dropped, hiwater, writes) + struct.pack("<III", *late)
-            + struct.pack("<IIHI", *probe))
+            + struct.pack("<IIHI", *probe) + struct.pack("<II", *emu))
 
 
 def bye_payload(reason=0) -> bytes:

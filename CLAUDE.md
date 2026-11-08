@@ -22,10 +22,15 @@ Read `README.md` (status table, decisions) and `docs/PROTOCOL.md` first; `docs/U
 * Protocol changes: bump `SNOOP_PROTO_VERSION` and `PROTO_VERSION` in `host/snoopproto.py`, update docs/PROTOCOL.md
   and both the C encoder and the Python encoder (tests use the Python one to build streams).
 * No Commodore ROM bytes and no SID tunes in the repo: tests read the TeensyROM checkout's bundled tunes (`TEENSYROM=`).
+* **No reSID in the repo** (GPL-2.0+; owner's decision): `tools/fetch_resid.py` fetches 0.16 at a pinned commit into a
+  tree's `Source/Teensy/src/reSID/` (or `build/resid` for tests); the glue builds the emulator in only when it finds it
+  (`__has_include`), and the stamp becomes `-snNr`. The plain patch and image stay MIT and reSID-free.
 
 ## Commands
 * `make test` — core via ctypes, C++ syntax check, firmware glue against host stubs, the player, real tunes end to end
   (the last two skip without `pip install pyresidfp numpy py65` / a TeensyROM checkout, default `../3p/TeensyROM`).
+* `make resid` then `make test-sid` (part of `make test` once fetched) — the glue's SID emulator against reSID driven
+  directly; equality needs the same `clock()` split points (reSID's filter integrates in steps of up to 8 cycles).
 * `make demo` — WAVs of bundled tunes in `build/demo/` (capture -> wire -> reSIDfp, no hardware).
 * `make build/libsnoop.so` before running `tests/test_core.py` alone (ctypes loads it).
 * `tools/armcheck/build.sh <3p> <TeensyROM> <name> [patches]` — ARM compile + isrPHI2 saved registers.
@@ -70,5 +75,8 @@ estimate's jitter with one STATUS a second. The "sound card took N samples/s" li
 meant ~2700 net drops; there were ~190): it counts from the first callback, during PortAudio's start-up fill. With Ms. Pac-Man (TCP, 42 s): 113 underruns, latency raised to
 103 ms: the automatic latency rose at 50 ms/s and repeats add only 15.6 ms/s, so the FIFO ran dry (reproduced in a
 simulation: 16 underruns, 0 at 12 ms/s). AUTO_UP is now 12 ms/s. Not yet on hardware.
+0.9-sn7 (phase 2 step 2): `snoop_t.on_write` hands each captured write with its exact C64 time to a consumer; with
+reSID in the tree (0.9-sn7r) the glue runs one 6581 (48 kHz, SAMPLE_FAST, output discarded) and STATUS v5 reports
+its cost (`emu_cyc` for `emu_c64`; `trsid.py --isr` prints "reSID N% of the time"). Host-tested, not on hardware.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
 file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.

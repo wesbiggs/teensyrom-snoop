@@ -298,9 +298,50 @@ class CpuProbe(unittest.TestCase):
         self.assertIsNone(st.cpu_free)
 
     def test_version_3_status_still_decodes(self):
-        p = sp.status_payload(1, 2, late=(3, 2, 1))[:-14]
+        p = sp.status_payload(1, 2, late=(3, 2, 1))[:-22]
         st = sp.parse_payload(p)
         self.assertEqual((st.late, st.late250, st.late1000, st.probe_cyc), (3, 2, 1, 0))
+
+
+class Consumer(unittest.TestCase):
+    """The per-write hook (phase 2: an emulator on the Teensy) and the STATUS fields for its cost."""
+
+    def test_every_write_with_its_exact_time(self):
+        LIB.sim_cons_t.restype = ctypes.c_uint64
+        s = Sim([(0xD400, 0xD41C)], gap=32)
+        LIB.sim_consumer(1)
+        rng = random.Random(4)
+        cyc = 10
+        sent = []
+        for k in range(300):
+            cyc += rng.choice([1, 3, 7, 40, 900])
+            a = 0xD400 + rng.randrange(0x1D)
+            s.bus(a, k & 0xFF, cyc, jitter=rng.randrange(0, 60))
+            sent.append((cyc, a, k & 0xFF))
+            s.bus(0xD020, 1, cyc + 1)                         # not watched: not passed on
+            if k % 17 == 0:
+                s.poll(cyc)                                   # "now" is never ahead of a later write
+        s.stop(cyc + 10)
+        got = [(LIB.sim_cons_t(i), LIB.sim_cons_ad(i) >> 8, LIB.sim_cons_ad(i) & 0xFF) for i in range(LIB.sim_cons_n())]
+        self.assertEqual(len(got), 300)
+        self.assertEqual(got, sent)       # each write's own cycle, even where the wire (gap 32) gives a block's time
+        self.assertEqual([(a, d) for _, a, d in got], [(a, d) for _, a, d in s.writes()])
+
+    def test_emu_cost_in_status_and_cleared(self):
+        s = Sim([(0xD418, 0xD418)])
+        LIB.sim_emu(1_000_000, 985_248)
+        LIB.sim_status()
+        LIB.sim_status()
+        s.drain()
+        st = s.of(sp.Status)
+        self.assertEqual((st[-2].emu_cyc, st[-2].emu_c64), (1_000_000, 985_248))
+        self.assertEqual((st[-1].emu_cyc, st[-1].emu_c64), (0, 0))
+        self.assertEqual(st[-2].emu_text(1_000_000_000, PAL), "reSID  0.1% of the time")
+        self.assertEqual(st[-1].emu_text(), "")
+
+    def test_version_4_status_still_decodes(self):
+        st = sp.parse_payload(sp.status_payload(1, 2, probe=(5, 4, 800, 3))[:-8])
+        self.assertEqual((st.probe_cyc, st.probe_worst, st.emu_c64), (5, 800, 0))
 
 
 class Limits(unittest.TestCase):

@@ -74,5 +74,19 @@ class DataPort(unittest.TestCase):
         self.assertEqual(dec.lost_frames, 0)
 
 
+@unittest.skipUnless(os.path.exists(os.path.join(ROOT, "build", "fw_sid.bin")), "no build/fw_sid.bin (make test-sid)")
+class SidEmulator(unittest.TestCase):
+    def test_status_reports_the_emulator_cost(self):
+        dec, fr, data = frames("fw_sid.bin")
+        sts = [f for f in fr if isinstance(f, sp.Status)]
+        self.assertTrue(sts)
+        emulated = sum(st.emu_c64 for st in sts)
+        self.assertGreater(emulated, sp.PHI2_PAL // 10)                  # the run, ~0.15 s of C64 time
+        self.assertLessEqual(emulated, sts[-1].time)                     # never ahead of the capture
+        self.assertGreater(sum(st.emu_cyc for st in sts), 0)
+        busy = [st for st in sts if st.emu_c64]
+        self.assertTrue(busy[0].emu_text(600_000_000, sp.PHI2_PAL).startswith("reSID"))
+
+
 if __name__ == "__main__":
     unittest.main()
