@@ -13,6 +13,7 @@
 #define FLASHMEM
 #define FASTRUN
 #define DMAMEM
+#define PSTR(s) (s)
 #define FeatWriteSnoop
 #define FeatTCPListen
 #define F_CPU_ACTUAL 600000000u

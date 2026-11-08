@@ -183,29 +183,43 @@ FLASHMEM void SnoopAudioFill(void *, uint8_t *Packet, uint32_t Len)
 
 USBAudioOut SnoopDongle(myusbHost, SnoopAudioFill);   // a USBHost_t36 driver: waits for a device on the host port
 
-// One line: the source, and what the dongle is doing
+// One line: the source, and what the dongle is doing.  The strings stay in flash (PSTR): RAM1 is scarce.
+FLASHMEM const char *SnoopAudioStep(uint8_t Step)
+{
+   switch (Step)
+   {
+   case 1: return PSTR("SET_INTERFACE");
+   case 2: return PSTR("SET_CUR rate");
+   case 3: return PSTR("GET_MIN volume");
+   case 4: return PSTR("GET_MAX volume");
+   case 5: return PSTR("SET_CUR volume");
+   case 6: return PSTR("SET_CUR mute");
+   default: return PSTR("?");
+   }
+}
+
 FLASHMEM void SnoopAudioReport(Stream *Out)
 {
-   static const char *const Steps[] = {"idle", "SET_INTERFACE", "SET_CUR rate", "GET_MIN volume", "GET_MAX volume",
-                                       "SET_CUR volume", "SET_CUR mute", "done"};
    USBAudioOut::Info i;
    SnoopDongle.info(&i);
-   Out->printf("Snoop audio: %s; ", SnoopAudioSource == SnoopToneSource ? "tone 1000 Hz" : "silence");
+   Out->printf(PSTR("Snoop audio: %s; "), SnoopAudioSource == SnoopToneSource ? PSTR("tone 1000 Hz") : PSTR("silence"));
    if (!i.attached)
    {
-      Out->printf("no USB audio device%s\n", i.last_reject == ISOAUDIO_NO_FORMAT ? " (one was offered: no 16-bit stereo 48 kHz)" :
-                  i.last_reject == ISOAUDIO_ASYNC ? " (one was offered: asynchronous, not supported)" :
-                  i.last_reject == ISOAUDIO_SMALL ? " (one was offered: packets too small)" : "");
+      Out->printf(PSTR("no USB audio device%s\n"),
+                  i.last_reject == ISOAUDIO_NO_FORMAT ? PSTR(" (one was offered: no 16-bit stereo 48 kHz)") :
+                  i.last_reject == ISOAUDIO_ASYNC ? PSTR(" (one was offered: asynchronous, not supported)") :
+                  i.last_reject == ISOAUDIO_SMALL ? PSTR(" (one was offered: packets too small)") : PSTR(""));
       return;
    }
-   Out->printf("%04X:%04X interface %u alt %u ep %02X, %s; frames %lu, errors %lu, missed %lu",
-               i.vid, i.pid, i.iface, i.alt, i.ep, i.streaming ? "streaming" : i.step < 0 ? "failed" : "starting",
+   Out->printf(PSTR("%04X:%04X interface %u alt %u ep %02X, %s; frames %lu, errors %lu, missed %lu"),
+               i.vid, i.pid, i.iface, i.alt, i.ep,
+               i.streaming ? PSTR("streaming") : i.step < 0 ? PSTR("failed") : PSTR("starting"),
                (unsigned long)i.iso.frames, (unsigned long)i.iso.errors, (unsigned long)i.iso.missed);
-   if (i.iso.errors) Out->printf(" (last siTD status %02lX)", (unsigned long)i.iso.status);
-   if (i.fu) Out->printf("; volume %d/256 dB (%d..%d)%s", i.volume, i.vol_min, i.vol_max, i.unmuted ? ", unmuted" : "");
-   else Out->printf("; no feature unit");
-   if (i.failed_step) Out->printf("; %s failed", i.failed_step < 8 ? Steps[i.failed_step] : "?");
-   Out->printf("\n");
+   if (i.iso.errors) Out->printf(PSTR(" (last siTD status %02lX)"), (unsigned long)i.iso.status);
+   if (i.fu) Out->printf(PSTR("; volume %d/256 dB (%d..%d)%s"), i.volume, i.vol_min, i.vol_max, i.unmuted ? PSTR(", unmuted") : PSTR(""));
+   else Out->printf(PSTR("; no feature unit"));
+   if (i.failed_step) Out->printf(PSTR("; %s failed"), SnoopAudioStep(i.failed_step));
+   Out->printf(PSTR("\n"));
 }
 
 // 64 53 03 mode: 0 silence, 1 the test tone, 2 only report
@@ -216,7 +230,7 @@ FLASHMEM void SnoopAudioCommand()
    if (Mode > 2)
    {
       SendU16(FailToken);
-      CmdChannel->println("Snoop audio: mode 0 silence, 1 tone, 2 report");
+      CmdChannel->printf(PSTR("Snoop audio: mode 0 silence, 1 tone, 2 report\n"));
       return;
    }
    if (Mode == 0) SnoopAudioSource = NULL;
