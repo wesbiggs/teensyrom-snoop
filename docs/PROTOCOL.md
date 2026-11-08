@@ -1,4 +1,4 @@
-# teensyrom-snoop protocol (version 5)
+# teensyrom-snoop protocol (version 6)
 
 All multi-byte numbers are little-endian unless marked otherwise. `varint` is unsigned LEB128
 (7 bits per byte, low group first, high bit = more).
@@ -21,8 +21,10 @@ listens). The protocol on 6581 is the same; only the port is new, so the version
 | `64 53 01 n {first, last}*n gap send_ms` | **start**: watch `n` (1-16) inclusive ranges, `first`/`last` u16 each. `gap` (u8) see below. `send_ms` (u8): send at most this often, in ms; 0 = the channel's default (20 on USB serial; on TCP, Nagle's rule from version 3: at once while nothing is unacknowledged, else up to 20 ms or 1 KB). Version 1 called this byte `flags` and required 0, which still means the default. |
 | `64 53 00` | **stop** |
 | `64 53 02` | **status**: queue a STATUS frame now |
+| `64 53 03 mode` | **audio** (version 6, firmware 0.9-sn8+): what the USB audio dongle on the TeensyROM's host port plays. `mode` 0 silence, 1 the test tone (1 kHz sine, -12 dBFS, both channels), 2 no change. Answered with Ack and **one line of text** reporting the source and the dongle (below). Works with or without a capture running, on any channel; the tone plays until switched off or the TeensyROM restarts. |
 
-Answer: `CC 64` (AckToken) or `7F 9B` (FailToken) followed by a text line. The TeensyROM refuses
+Answer: `CC 64` (AckToken) or `7F 9B` (FailToken) followed by a text line (a refusal; the audio command's report
+after an Ack). The audio command refuses a `mode` above 2. The TeensyROM refuses
 a start whose ranges cover more than 16 distinct 256-byte pages, a range with `first > last`, or 0 or
 more than 16 ranges; a refused start leaves a running capture alone.
 
@@ -30,6 +32,26 @@ A start answers Ack, then the stream begins on **that channel**, starting with H
 a capture runs replaces it: the old channel gets STATUS and BYE (reason 1) first. Stop sends
 STATUS and BYE (reason 0) to the capture's channel. If the capture's TCP client disconnects, the
 capture stops by itself.
+
+The audio command's report, for example:
+
+```
+Snoop audio: tone 1000 Hz; 0020:0B21 interface 2 alt 1 ep 03, streaming; frames 52311, errors 0, missed 0; volume 0/256 dB (-11520..0), unmuted
+Snoop audio: silence; no USB audio device
+```
+
+* the source (`tone 1000 Hz` or `silence`), then the device: USB vendor:product, the AudioStreaming interface and
+  alternate setting, the endpoint, and `streaming`, `starting` (its setup requests are under way) or `failed`.
+* `frames`, `errors`, `missed`: 1 ms packets sent without an error, packets the host controller flagged (with the last
+  siTD status byte), and frames that went out with nothing queued because the refill came too late. Counted
+  since the device was plugged in; the counts trail by up to 32 ms (a packet is counted when its slot is reused).
+* the feature unit's volume as set (0 dB clamped into the device's range; 1/256 dB units) and whether it was unmuted,
+  or `no feature unit`; `... failed` names a setup request the device refused (the stream starts anyway unless it was
+  `SET_INTERFACE`).
+* with nothing plugged in, `no USB audio device`, and in brackets why an audio device that was offered was not taken
+  (no 16-bit stereo 48 kHz, an asynchronous sink, packets too small).
+
+The protocol on the stream is unchanged in version 6: only the command is new (HELLO carries 6).
 
 ## Stream (TeensyROM to host)
 

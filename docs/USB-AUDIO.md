@@ -102,6 +102,82 @@ the emulator to each write's cycle and write the register. That is what `host/si
    Step 2 done.
 3. Independently of 2: the UAC1 host driver and siTD support, tested with a sine wave on one adaptive dongle,
    and with Ms. Pac-Man running to confirm the host port leaves `isrPHI2` alone (`trsid.py --isr`'s late counts over TCP).
+   **In 0.9-sn8 (host-tested and compiled for the M7, not yet on hardware):** isochronous OUT through siTDs in the
+   bundled USBHost_t36, a UAC1 output driver, and a 1 kHz test tone switched by command `64 53 03` (protocol 6,
+   `trsnoop.py --tone on|off|status`). See "Step 3 in 0.9-sn8" below, and "Trying it on hardware" for the owner's checks.
 4. Connect them: the emulator renders into the siTD ring, samples per frame following phi2.
 5. Compare the dongle's line out with `trsid.py`'s rendering of the same stream (both reSID-family, so the SNR
    test in `tests/test_e2e.py` carries over), recorded through a computer's line in.
+
+## Step 3 in 0.9-sn8
+
+All of it is MIT and in the plain patch (no reSID needed). The sources are in `firmware/usbhost/`; `tools/make_tr_patch.py`
+copies them to the tree's `Source/Teensy/src/USBHost_t36/` and edits `ehci.cpp` there (teensyrom-vdrive's patch does not
+touch the library).
+
+* **Isochronous OUT (`ehci.cpp`, `isochronous.h`).** One siTD for each of the 32 slots of the periodic frame list, linked
+  first in its slot, ahead of the interrupt QHs; `add_qh_to_periodic_schedule` now steps past siTDs to the QH tree (its
+  "TODO: skip past iTD, siTD"). A siTD goes out in its slot's frame when active. The refill keeps frames cur+2 .. cur+8
+  queued (8 ms of latency, and the refill may come up to ~6 ms late without a gap): it runs in `USBHost::isr()`, on each
+  siTD's interrupt-on-complete, so once a frame at the USBHS interrupt's default priority, below phi2. It reads the
+  status of the siTD a slot last carried (counts `frames`, `errors`, and `missed` when the queue ran dry), asks the fill
+  function for the next packet, flushes the buffer from the data cache and activates the siTD. A 192-byte packet takes
+  two start-splits (188 + 4 bytes), in microframes picked from the bandwidth table like an interrupt pipe's.
+  * Memory: the siTDs (1 KB) live in DTCM like the QHs, because the schedule code rewrites the link word of whatever
+    precedes a QH, a siTD included, and that write must reach the controller without a cache flush. The packet buffers
+    (32 x 256 bytes, 256-aligned so none crosses a 4 KB page) are in RAM2 and flushed after each fill. RAM1 in all:
+    ~1.9 KB (the siTDs, the driver object, ~320 bytes of refill code); the setup code is in flash.
+  * Interrupt masking: only `NVIC_DISABLE_IRQ(IRQ_USBHS)` while the siTDs are linked or unlinked, as the library does when
+    it queues a transfer. No global masking. `isrPHI2` and `SnoopTap` compile to the same code as in sn7 (`tools/armcheck`).
+* **The driver (`USBAudioOut.{h,cpp}`, portable parsing in `isoaudio.{h,c}`).** USBHost_t36 offers every interface
+  descriptor to every free driver. The driver remembers the AudioControl interface's terminals and units (without
+  claiming it), and claims the first AudioStreaming interface with an alternate setting that takes Type I PCM, 2 channels
+  of 16 bits, 48000 Hz (in its list or its range), on an isochronous OUT endpoint that is synchronous, adaptive or
+  unsynchronised and carries at least 192 bytes. Capture and HID interfaces stay free. Full speed only. Then:
+  `SET_INTERFACE` to that alternate setting; `SET_CUR` of the sampling rate only when the format lists more than one rate
+  (the owner's dongle lists one); the stream starts; then, through the feature unit downstream of the stream's input
+  terminal (if any), the volume is set to 0 dB clamped into its `GET_MIN`..`GET_MAX` range and mute is switched off. A
+  refused request is noted in the report and skipped, except `SET_INTERFACE`, without which nothing streams.
+  Unplugging stops the stream and unlinks the siTDs; plugging back in goes through all of it again.
+* **The source (`WriteSnoop.ino`).** `SnoopAudioFill` asks `SnoopAudioSource` for 48 stereo frames (192 bytes) each
+  frame, or writes silence when it is NULL. The test tone is a 1 kHz sine at -12 dBFS from a 1024-step table with linear
+  interpolation (integer only; measured spurs about -90 dB, tested below -80 dB), phase-continuous across packets. Step 4 sets the source to a
+  function that hands over 1 ms of reSID's output; the USB frames and the snoop timeline both run on the Teensy's
+  crystal, so 48 samples per frame stay exact.
+* **Host tests** (`make test`): `tests/test_usbaudio.py` parses a fixture of the owner's dongle (built from its `lsusb -v`
+  summary above; the unit IDs and HID details are typical values, not read from the device) and variants (24-bit, mono,
+  44.1 kHz, two rates, a continuous range, asynchronous, small packets, IN, bulk, a feature unit behind a mixer,
+  per-channel controls, 3000 corrupted copies), the siTD words, the frame plan against a model of the controller (no
+  gaps when the refill comes in time, every empty frame counted when it does not), and the tone. `tests/fw_host` runs the
+  command through the glue with a stand-in for the driver: the reports, 1000 packets of exactly 192 bytes equal to one
+  continuous tone, left = right, silence when off, a refused mode, a cut-short command, and the command on a capture's
+  channel. `tests/test_fw.py` checks the tone's spectrum.
+* **Risks only hardware can settle.** That the i.MX RT's embedded transaction translator runs siTDs for a full-speed
+  device on the root port (the EHCI way, which the library's interrupt QHs already rely on, with hub address 0 and port
+  0); that a siTD's interrupt-on-complete raises the periodic interrupt (UPI; the driver also enables the plain USB
+  interrupt, UI, while streaming, in case it does not); that the dongle plays with no `SET_CUR` of the rate.
+
+## Trying it on hardware (0.9-sn8)
+
+1. **Flash** `TeensyROM+_0.9-sn8_full.hex` (CI's `firmware` artifact, or build it as in the README). The TR menu's top line
+   reads `v0.9-sn8`. Plug the dongle straight into the TeensyROM's USB host port (no hub for the first try), and connect
+   its 3.5 mm output to an amplifier or powered speakers at a low volume: the tone is -12 dBFS at the dongle's 0 dB.
+2. **Is it streaming?** `host/trsnoop.py --tcp <ip> --tone status`, twice a few seconds apart. Expected:
+   `Snoop audio: silence; 0020:0B21 interface 2 alt 1 ep 03, streaming; frames N, errors 0, missed 0; volume ... unmuted`,
+   with `frames` rising by ~1000 a second. If not:
+   * `no USB audio device`: it was not claimed (the bracket says why, if an audio interface was offered).
+   * `starting` that stays: a setup request never finished. `failed` / `SET_INTERFACE failed`: the device refused it.
+   * `errors` rising: the controller flags the packets; report the `last siTD status` byte (40 halted, 20 buffer error,
+     10 babble, 08 transaction error, 04 missed microframe).
+   * `frames` stuck at a few dozen: the refill is not called (no interrupt for siTDs).
+3. **The tone.** `host/trsnoop.py --tcp <ip> --tone on`: a steady 1 kHz from the dongle. `--tone off`: silence. Clicks or
+   gaps show up as `missed` or `errors` in `--tone status`.
+4. **With Ms. Pac-Man** (tone on): launch the game, then `host/trsid.py --tcp <ip> --isr` for a few minutes. The `>250ns`
+   and `>1us` late counts should stay at 0, as in sn7r, and the game must not crash. While trsid holds port 6581, ask for
+   the status on the TeensyROM's own port: `host/trsnoop.py --tcp <ip> --tcp-port 2112 --tone status` (`missed` and
+   `errors` should stay 0). For comparison, the same run with the dongle unplugged.
+5. **Unplug and replug** the dongle with the tone on. `--tone status` says `no USB audio device` while it is out; about a
+   second after it is back it says `streaming` with `frames` counting from 0 again, and the tone plays with no new
+   command (the source stays the tone until switched off or the TeensyROM restarts).
+
+Report back the `--tone status` lines, the late counts, and anything audible (clicks, wrong pitch: 1 kHz exactly).

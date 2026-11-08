@@ -74,6 +74,38 @@ class DataPort(unittest.TestCase):
         self.assertEqual(dec.lost_frames, 0)
 
 
+class Tone(unittest.TestCase):
+    """The 1 kHz test tone as the dongle gets it (tests/fw_host section 10: 1000 frames of 192 bytes)."""
+
+    @staticmethod
+    def level(x, hz, rate=48000):
+        """amplitude of the hz component (Goertzel), in the samples' units"""
+        import math
+        w = 2 * math.pi * hz / rate
+        c = 2 * math.cos(w)
+        s1 = s2 = 0.0
+        for v in x:
+            s1, s2 = v + c * s1 - s2, s1
+        return 2 * math.sqrt(max(s1 * s1 + s2 * s2 - c * s1 * s2, 0.0)) / len(x)
+
+    def test_spectrum(self):
+        import array
+        import math
+        with open(os.path.join(ROOT, "build", "fw_tone.raw"), "rb") as fh:
+            data = fh.read()
+        self.assertEqual(len(data), 192 * 1000)
+        a = array.array("h")
+        a.frombytes(data)
+        if sys.byteorder != "little":
+            a.byteswap()
+        left = a[0::2]
+        self.assertEqual(list(left), list(a[1::2]))
+        fund = self.level(left, 1000)
+        self.assertAlmostEqual(fund, 8192, delta=8)                     # -12 dBFS
+        for hz in (500, 2000, 3000, 5000, 7000, 11000):
+            self.assertLess(20 * math.log10(self.level(left, hz) / fund + 1e-12), -80, f"{hz} Hz")
+
+
 @unittest.skipUnless(os.path.exists(os.path.join(ROOT, "build", "fw_sid.bin")), "no build/fw_sid.bin (make test-sid)")
 class SidEmulator(unittest.TestCase):
     def test_status_reports_the_emulator_cost(self):

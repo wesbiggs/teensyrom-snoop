@@ -19,6 +19,11 @@ Read `README.md` (status table, decisions) and `docs/PROTOCOL.md` first; `docs/U
 * **Version stamp:** `tools/stamp_version.py <tree>` (after the patches) makes TRVersion `<base>-sn<firmware/SNREV>`,
   shown at the top of the TR menu. **Bump `firmware/SNREV` on any commit that changes firmware behaviour** (`core/`,
   `firmware/`, the patch edits). Keep the stamp out of the patch: teensyrom-vdrive's patch edits the same line.
+* The USB audio driver (phase 2 step 3) lives in `firmware/usbhost/`: `make_tr_patch.py` copies `USBAudioOut.{h,cpp}`,
+  `isochronous.h`, `isoaudio.{h,c}` to the tree's `src/USBHost_t36/` and appends `ehci_iso.inc` to `ehci.cpp` (plus the
+  include, the refill call in `isr()` and the siTD skip in `add_qh_to_periodic_schedule`). The USBHS interrupt keeps its
+  default priority (below phi2); mask only `IRQ_USBHS`, never all interrupts. siTDs stay in DTCM (the QH code writes
+  their link word); packet buffers are RAM2 and must be flushed. `isoaudio.c` is portable C (host-tested via ctypes).
 * Protocol changes: bump `SNOOP_PROTO_VERSION` and `PROTO_VERSION` in `host/snoopproto.py`, update docs/PROTOCOL.md
   and both the C encoder and the Python encoder (tests use the Python one to build streams).
 * No Commodore ROM bytes and no SID tunes in the repo: tests read the TeensyROM checkout's bundled tunes (`TEENSYROM=`).
@@ -32,7 +37,7 @@ Read `README.md` (status table, decisions) and `docs/PROTOCOL.md` first; `docs/U
 * `make resid` then `make test-sid` (part of `make test` once fetched) — the glue's SID emulator against reSID driven
   directly; equality needs the same `clock()` split points (reSID's filter integrates in steps of up to 8 cycles).
 * `make demo` — WAVs of bundled tunes in `build/demo/` (capture -> wire -> reSIDfp, no hardware).
-* `make build/libsnoop.so` before running `tests/test_core.py` alone (ctypes loads it).
+* `make build/libsnoop.so` before running `tests/test_core.py` alone (ctypes loads it); `make test-audio` for `tests/test_usbaudio.py`.
 * `tools/armcheck/build.sh <3p> <TeensyROM> <name> [patches]` — ARM compile + isrPHI2 saved registers.
 
 ## Status
@@ -80,5 +85,11 @@ reSID in the tree (0.9-sn7r) the glue runs one 6581 (48 kHz, SAMPLE_FAST, output
 its cost (`emu_cyc` for `emu_c64`; `trsid.py --isr` prints "reSID N% of the time"). On hardware (owner, 2026-11-08,
 Ms. Pac-Man, TCP): reSID 26.0% of the time, CPU free 48.7%, no late phi2; the player had 0 underruns (AUTO_UP 12 ms/s
 confirmed). Step 2 done; next is step 3, the USB audio host driver.
+0.9-sn8 (phase 2 step 3): isochronous OUT (siTDs) in the bundled USBHost_t36, the `USBAudioOut` UAC1 driver (16-bit stereo
+48 kHz, the owner's AB13X dongle `0020:0b21`), and command `64 53 03 mode` (protocol 6; 0 silence, 1 a 1 kHz tone,
+2 report; answered with Ack and a text line; `trsnoop.py --tone on|off|status`). The source is `SnoopAudioSource`
+(192 bytes a frame from the USBHS interrupt): step 4 points it at reSID. Host-tested, compiles for the M7 (also with
+vdrive, both orders; `isrPHI2`/`SnoopTap` identical to sn7; RAM1 +~1.9 KB). **Not yet on hardware**: the owner's
+checklist is in docs/USB-AUDIO.md ("Trying it on hardware"). Open risks: the embedded TT running siTDs, UPI for siTD IOC.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
 file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.

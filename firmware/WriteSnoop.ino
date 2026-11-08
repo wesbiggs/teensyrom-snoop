@@ -149,7 +149,88 @@ FLASHMEM bool SnoopGetByte(uint8_t *b)
    return true;
 }
 
-// 0x64 0x53, then: 0 stop | 1 start n {first lo,hi, last lo,hi}*n gap flags | 2 status
+// The USB audio dongle on the host port (0.9-sn8, phase 2 step 3, docs/USB-AUDIO.md).  USBAudioOut (in
+// src/USBHost_t36, with isochronous OUT added to ehci.cpp) claims a USB Audio Class 1 device that takes 16-bit
+// stereo at 48 kHz, and streams whatever SnoopAudioFill gives it: 48 stereo frames (192 bytes) every 1 ms frame,
+// asked for in the USBHS interrupt (below phi2's priority) a few frames ahead.  The source is silence, or the
+// 1 kHz test tone that command 64 53 03 switches.  Phase 2 step 4 makes reSID the source: 1 ms of the snoop
+// timeline per frame, which runs on the same crystal as the USB frames, so no rate matching is needed.
+#ifndef SNOOP_AUDIO_STUB   // tests/fw_host brings a stand-in
+#include "src/USBHost_t36/USBAudioOut.h"
+#else
+#include "src/USBHost_t36/isoaudio.h"
+#endif
+#define SnoopAudioRate  48000
+#define SnoopToneHz     1000
+#define SnoopToneAmp    8192     // -12 dBFS
+isoaudio_tone_t SnoopTone;
+// The sample source: Frames stereo frames, 16-bit little endian, to Packet.  NULL: silence.  Runs in the USBHS
+// interrupt, so it must not block; swap it by storing a new pointer (one aligned word).
+typedef void (*SnoopAudioSourceFn)(uint8_t *Packet, uint32_t Frames);
+volatile SnoopAudioSourceFn SnoopAudioSource = NULL;
+
+FLASHMEM void SnoopToneSource(uint8_t *Packet, uint32_t Frames)
+{
+   isoaudio_tone_packet(&SnoopTone, Packet, Frames);
+}
+
+FLASHMEM void SnoopAudioFill(void *, uint8_t *Packet, uint32_t Len)
+{
+   const SnoopAudioSourceFn Source = SnoopAudioSource;
+   if (Source) Source(Packet, Len / 4);
+   else memset(Packet, 0, Len);
+}
+
+USBAudioOut SnoopDongle(myusbHost, SnoopAudioFill);   // a USBHost_t36 driver: waits for a device on the host port
+
+// One line: the source, and what the dongle is doing
+FLASHMEM void SnoopAudioReport(Stream *Out)
+{
+   static const char *const Steps[] = {"idle", "SET_INTERFACE", "SET_CUR rate", "GET_MIN volume", "GET_MAX volume",
+                                       "SET_CUR volume", "SET_CUR mute", "done"};
+   USBAudioOut::Info i;
+   SnoopDongle.info(&i);
+   Out->printf("Snoop audio: %s; ", SnoopAudioSource == SnoopToneSource ? "tone 1000 Hz" : "silence");
+   if (!i.attached)
+   {
+      Out->printf("no USB audio device%s\n", i.last_reject == ISOAUDIO_NO_FORMAT ? " (one was offered: no 16-bit stereo 48 kHz)" :
+                  i.last_reject == ISOAUDIO_ASYNC ? " (one was offered: asynchronous, not supported)" :
+                  i.last_reject == ISOAUDIO_SMALL ? " (one was offered: packets too small)" : "");
+      return;
+   }
+   Out->printf("%04X:%04X interface %u alt %u ep %02X, %s; frames %lu, errors %lu, missed %lu",
+               i.vid, i.pid, i.iface, i.alt, i.ep, i.streaming ? "streaming" : i.step < 0 ? "failed" : "starting",
+               (unsigned long)i.iso.frames, (unsigned long)i.iso.errors, (unsigned long)i.iso.missed);
+   if (i.iso.errors) Out->printf(" (last siTD status %02lX)", (unsigned long)i.iso.status);
+   if (i.fu) Out->printf("; volume %d/256 dB (%d..%d)%s", i.volume, i.vol_min, i.vol_max, i.unmuted ? ", unmuted" : "");
+   else Out->printf("; no feature unit");
+   if (i.failed_step) Out->printf("; %s failed", i.failed_step < 8 ? Steps[i.failed_step] : "?");
+   Out->printf("\n");
+}
+
+// 64 53 03 mode: 0 silence, 1 the test tone, 2 only report
+FLASHMEM void SnoopAudioCommand()
+{
+   uint8_t Mode;
+   if (!SnoopGetByte(&Mode)) return;
+   if (Mode > 2)
+   {
+      SendU16(FailToken);
+      CmdChannel->println("Snoop audio: mode 0 silence, 1 tone, 2 report");
+      return;
+   }
+   if (Mode == 0) SnoopAudioSource = NULL;
+   if (Mode == 1 && SnoopAudioSource != SnoopToneSource)
+   {
+      isoaudio_tone_init(&SnoopTone, SnoopToneHz, SnoopAudioRate, SnoopToneAmp);
+      SNOOP_BARRIER();   // the tone is ready before the interrupt can see the pointer
+      SnoopAudioSource = SnoopToneSource;
+   }
+   SendU16(AckToken);
+   SnoopAudioReport(CmdChannel);
+}
+
+// 0x64 0x53, then: 0 stop | 1 start n {first lo,hi, last lo,hi}*n gap flags | 2 status | 3 audio mode
 FLASHMEM void SnoopCommand()
 {
    SnoopSetup();
@@ -171,6 +252,11 @@ FLASHMEM void SnoopCommand()
    {
       SendU16(AckToken);
       if (SnoopState.running) snoop_status(&SnoopState);
+      return;
+   }
+   if (Op == 3)
+   {
+      SnoopAudioCommand();
       return;
    }
    if (Op != 1)

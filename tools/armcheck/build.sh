@@ -34,5 +34,19 @@ arm-none-eabi-g++ -c -O2 -g -mthumb -mcpu=cortex-m7 -mfloat-abi=hard -mfpu=fpv5-
 RC=$?
 echo "$NAME: exit $RC ($(grep -c 'error:' "$OUT/$NAME.log") errors)"
 [ $RC -eq 0 ] || exit $RC
+# Library sources under src/ that the patches add or change (Arduino compiles them on their own, not in the merge)
+for f in $(git -C "$T" status --porcelain --untracked-files=all -- Source/Teensy/src | awk '{print $2}' | grep -E '\.(c|cpp)$'); do
+  B=$(basename "$f"); O="$OUT/$NAME-$B.o"
+  case "$f" in
+    *.c) CC1="arm-none-eabi-gcc -std=gnu11";;
+    *) CC1="arm-none-eabi-g++ -std=gnu++17 -fno-exceptions -fpermissive -fno-rtti -fno-threadsafe-statics -felide-constructors";;
+  esac
+  $CC1 -c -O2 -g -mthumb -mcpu=cortex-m7 -mfloat-abi=hard -mfpu=fpv5-d16 -D__IMXRT1062__ -DTEENSYDUINO=161 \
+    -DARDUINO_TEENSY41 -DARDUINO=10819 -DF_CPU=600000000 -DUSB_MIDI_SERIAL -DLAYOUT_US_ENGLISH -ffunction-sections \
+    -fdata-sections -Wall $INC "$T/$f" -o "$O" > "$OUT/$NAME-$B.log" 2>&1
+  R=$?
+  echo "$NAME: $f exit $R ($(grep -c 'error:' "$OUT/$NAME-$B.log") errors, $(grep -c 'warning:' "$OUT/$NAME-$B.log") warnings)"
+  [ $R -eq 0 ] || exit $R
+done
 arm-none-eabi-objdump -d --no-show-raw-insn -C "$OUT/$NAME.o" | awk '/<(isrPHI2\(\)|SnoopTap\(unsigned short\))>:/{p=1} p{print} p&&/^$/{p=0}' > "$OUT/$NAME.isr.s"
 echo "isrPHI2 saves: $(awk '/<isrPHI2\(\)>:/{p=1} p&&/stmdb|push/{print; exit}' "$OUT/$NAME.isr.s" | sed 's/^[^\t]*\t//')"

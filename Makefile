@@ -11,15 +11,24 @@ build/libsnoop.so: core/snoop.c core/snoop.h tests/shim.c | build
 build:
 	mkdir -p build
 
+# the portable half of the USB audio driver (firmware/usbhost/isoaudio.c), for tests/test_usbaudio.py
+build/libisoaudio.so: firmware/usbhost/isoaudio.c firmware/usbhost/isoaudio.h | build
+	$(CC) $(CFLAGS) -fPIC -shared -o $@ firmware/usbhost/isoaudio.c
+
 # the firmware compiles the core as C++
 check-cxx: | build
 	$(CXX) -std=gnu++17 -Wall -Wextra -Werror -x c++ -fsyntax-only core/snoop.c
+	$(CXX) -std=gnu++17 -Wall -Wextra -Werror -x c++ -fsyntax-only firmware/usbhost/isoaudio.c
 
 # the firmware glue against host stubs (tests/fw_host)
 build/inc/snoop: | build
 	mkdir -p build/inc && ln -sfn ../../core build/inc/snoop
 
-test-fw: | build/inc/snoop
+# the glue includes the USB audio header from the tree's src/USBHost_t36/ (firmware/usbhost/ here)
+build/inc/src/USBHost_t36: | build
+	mkdir -p build/inc/src && ln -sfn ../../../firmware/usbhost build/inc/src/USBHost_t36
+
+test-fw: | build/inc/snoop build/inc/src/USBHost_t36
 	$(CXX) -std=gnu++17 -Wall -Wextra -Werror -Ibuild/inc -o build/fw_host tests/fw_host/main.cpp
 	./build/fw_host
 	$(PYTHON) -m unittest -v tests/test_fw.py
@@ -39,7 +48,7 @@ ifeq ($(RESID_SRC),)
 test-sid:
 	@echo "test-sid: skipped (no build/resid: make resid)"
 else
-test-sid: $(RESID_OBJ) | build/inc/snoop
+test-sid: $(RESID_OBJ) | build/inc/snoop build/inc/src/USBHost_t36
 	$(CXX) -std=gnu++17 -O2 -Wall -Wextra -Werror -Ibuild/inc -isystem build/resid -DSNOOP_RESID_H='"sid.h"' \
 	  -o build/fw_host_sid tests/fw_host/main.cpp $(RESID_OBJ)
 	./build/fw_host_sid
@@ -48,6 +57,10 @@ endif
 
 test-core: build/libsnoop.so
 	$(PYTHON) -m unittest -v tests/test_core.py
+
+# the USB audio driver's portable half: UAC1 descriptors (the owner's dongle), siTD words, the frame plan, the tone
+test-audio: build/libisoaudio.so
+	$(PYTHON) -m unittest -v tests/test_usbaudio.py
 
 # the reSIDfp player (skipped without pip install pyresidfp numpy)
 test-player:
@@ -58,7 +71,7 @@ TEENSYROM ?= ../../3p/TeensyROM
 test-e2e: build/libsnoop.so
 	TEENSYROM=$(TEENSYROM) $(PYTHON) -m unittest -v tests/test_e2e.py
 
-test: check-cxx test-core test-fw test-sid test-player test-e2e
+test: check-cxx test-core test-audio test-fw test-sid test-player test-e2e
 
 # the live path in real time against tools/fake_tr.py (timing-dependent: not in make test)
 test-live: demo
@@ -75,4 +88,4 @@ demo: build/libsnoop.so
 clean:
 	rm -rf build
 
-.PHONY: all resid test-sid check-cxx test-core test-fw test-player test-e2e test test-live demo clean
+.PHONY: all resid test-sid check-cxx test-core test-audio test-fw test-player test-e2e test test-live demo clean

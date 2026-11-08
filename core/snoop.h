@@ -22,7 +22,7 @@
 extern "C" {
 #endif
 
-#define SNOOP_PROTO_VERSION 5
+#define SNOOP_PROTO_VERSION 6
 
 #ifndef SNOOP_MAX_RANGES
 #define SNOOP_MAX_RANGES   16     /* address ranges per start command */

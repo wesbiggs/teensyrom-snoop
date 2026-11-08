@@ -111,10 +111,10 @@ index 0000000..0555a91
 +#endif
 diff --git a/Source/Teensy/WriteSnoop.ino b/Source/Teensy/WriteSnoop.ino
 new file mode 100644
-index 0000000..797f30b
+index 0000000..599ca00
 --- /dev/null
 +++ b/Source/Teensy/WriteSnoop.ino
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,403 @@
 +// teensyrom-snoop: the main-loop half.  Command 0x6453 from the USB serial or TCP channel, and
 +// SnoopService() from loop().  Protocol: docs/PROTOCOL.md in teensyrom-snoop.
 +
@@ -266,7 +266,88 @@ index 0000000..797f30b
 +   return true;
 +}
 +
-+// 0x64 0x53, then: 0 stop | 1 start n {first lo,hi, last lo,hi}*n gap flags | 2 status
++// The USB audio dongle on the host port (0.9-sn8, phase 2 step 3, docs/USB-AUDIO.md).  USBAudioOut (in
++// src/USBHost_t36, with isochronous OUT added to ehci.cpp) claims a USB Audio Class 1 device that takes 16-bit
++// stereo at 48 kHz, and streams whatever SnoopAudioFill gives it: 48 stereo frames (192 bytes) every 1 ms frame,
++// asked for in the USBHS interrupt (below phi2's priority) a few frames ahead.  The source is silence, or the
++// 1 kHz test tone that command 64 53 03 switches.  Phase 2 step 4 makes reSID the source: 1 ms of the snoop
++// timeline per frame, which runs on the same crystal as the USB frames, so no rate matching is needed.
++#ifndef SNOOP_AUDIO_STUB   // tests/fw_host brings a stand-in
++#include "src/USBHost_t36/USBAudioOut.h"
++#else
++#include "src/USBHost_t36/isoaudio.h"
++#endif
++#define SnoopAudioRate  48000
++#define SnoopToneHz     1000
++#define SnoopToneAmp    8192     // -12 dBFS
++isoaudio_tone_t SnoopTone;
++// The sample source: Frames stereo frames, 16-bit little endian, to Packet.  NULL: silence.  Runs in the USBHS
++// interrupt, so it must not block; swap it by storing a new pointer (one aligned word).
++typedef void (*SnoopAudioSourceFn)(uint8_t *Packet, uint32_t Frames);
++volatile SnoopAudioSourceFn SnoopAudioSource = NULL;
++
++FLASHMEM void SnoopToneSource(uint8_t *Packet, uint32_t Frames)
++{
++   isoaudio_tone_packet(&SnoopTone, Packet, Frames);
++}
++
++FLASHMEM void SnoopAudioFill(void *, uint8_t *Packet, uint32_t Len)
++{
++   const SnoopAudioSourceFn Source = SnoopAudioSource;
++   if (Source) Source(Packet, Len / 4);
++   else memset(Packet, 0, Len);
++}
++
++USBAudioOut SnoopDongle(myusbHost, SnoopAudioFill);   // a USBHost_t36 driver: waits for a device on the host port
++
++// One line: the source, and what the dongle is doing
++FLASHMEM void SnoopAudioReport(Stream *Out)
++{
++   static const char *const Steps[] = {"idle", "SET_INTERFACE", "SET_CUR rate", "GET_MIN volume", "GET_MAX volume",
++                                       "SET_CUR volume", "SET_CUR mute", "done"};
++   USBAudioOut::Info i;
++   SnoopDongle.info(&i);
++   Out->printf("Snoop audio: %s; ", SnoopAudioSource == SnoopToneSource ? "tone 1000 Hz" : "silence");
++   if (!i.attached)
++   {
++      Out->printf("no USB audio device%s\n", i.last_reject == ISOAUDIO_NO_FORMAT ? " (one was offered: no 16-bit stereo 48 kHz)" :
++                  i.last_reject == ISOAUDIO_ASYNC ? " (one was offered: asynchronous, not supported)" :
++                  i.last_reject == ISOAUDIO_SMALL ? " (one was offered: packets too small)" : "");
++      return;
++   }
++   Out->printf("%04X:%04X interface %u alt %u ep %02X, %s; frames %lu, errors %lu, missed %lu",
++               i.vid, i.pid, i.iface, i.alt, i.ep, i.streaming ? "streaming" : i.step < 0 ? "failed" : "starting",
++               (unsigned long)i.iso.frames, (unsigned long)i.iso.errors, (unsigned long)i.iso.missed);
++   if (i.iso.errors) Out->printf(" (last siTD status %02lX)", (unsigned long)i.iso.status);
++   if (i.fu) Out->printf("; volume %d/256 dB (%d..%d)%s", i.volume, i.vol_min, i.vol_max, i.unmuted ? ", unmuted" : "");
++   else Out->printf("; no feature unit");
++   if (i.failed_step) Out->printf("; %s failed", i.failed_step < 8 ? Steps[i.failed_step] : "?");
++   Out->printf("\n");
++}
++
++// 64 53 03 mode: 0 silence, 1 the test tone, 2 only report
++FLASHMEM void SnoopAudioCommand()
++{
++   uint8_t Mode;
++   if (!SnoopGetByte(&Mode)) return;
++   if (Mode > 2)
++   {
++      SendU16(FailToken);
++      CmdChannel->println("Snoop audio: mode 0 silence, 1 tone, 2 report");
++      return;
++   }
++   if (Mode == 0) SnoopAudioSource = NULL;
++   if (Mode == 1 && SnoopAudioSource != SnoopToneSource)
++   {
++      isoaudio_tone_init(&SnoopTone, SnoopToneHz, SnoopAudioRate, SnoopToneAmp);
++      SNOOP_BARRIER();   // the tone is ready before the interrupt can see the pointer
++      SnoopAudioSource = SnoopToneSource;
++   }
++   SendU16(AckToken);
++   SnoopAudioReport(CmdChannel);
++}
++
++// 0x64 0x53, then: 0 stop | 1 start n {first lo,hi, last lo,hi}*n gap flags | 2 status | 3 audio mode
 +FLASHMEM void SnoopCommand()
 +{
 +   SnoopSetup();
@@ -288,6 +369,11 @@ index 0000000..797f30b
 +   {
 +      SendU16(AckToken);
 +      if (SnoopState.running) snoop_status(&SnoopState);
++      return;
++   }
++   if (Op == 3)
++   {
++      SnoopAudioCommand();
 +      return;
 +   }
 +   if (Op != 1)
@@ -803,7 +889,7 @@ index 0000000..b722004
 +}
 diff --git a/Source/Teensy/snoop/snoop.h b/Source/Teensy/snoop/snoop.h
 new file mode 100644
-index 0000000..b948cbd
+index 0000000..07cde91
 --- /dev/null
 +++ b/Source/Teensy/snoop/snoop.h
 @@ -0,0 +1,237 @@
@@ -831,7 +917,7 @@ index 0000000..b948cbd
 +extern "C" {
 +#endif
 +
-+#define SNOOP_PROTO_VERSION 5
++#define SNOOP_PROTO_VERSION 6
 +
 +#ifndef SNOOP_MAX_RANGES
 +#define SNOOP_MAX_RANGES   16     /* address ranges per start command */
@@ -1043,4 +1129,998 @@ index 0000000..b948cbd
 +#ifdef __cplusplus
 +}
 +#endif
++#endif
+diff --git a/Source/Teensy/src/USBHost_t36/README.md b/Source/Teensy/src/USBHost_t36/README.md
+index 2e2ad0b..dab7ec8 100644
+--- a/Source/Teensy/src/USBHost_t36/README.md
++++ b/Source/Teensy/src/USBHost_t36/README.md
+@@ -27,6 +27,7 @@ The copy tracks tag `tr-pin-f943c4b` in the fork, [SensoriumEmbedded/USBHost_t36
+ **Local modifications** (reapply these when replacing the contents):
+ 
+ - `utility/USBFilesystemFormatter.h`: `#include "USBHost_t36.h"` changed to `#include "../USBHost_t36.h"`. A quoted include is looked up next to the including file first, and inside `utility/` that finds nothing. As a normal library it then falls back to the library's own folder on the include path, but under a sketch's `src/` there is no such path. arduino-cli would then add Teensyduino's copy to find the header, and the link fails with multiple definitions.
++- teensyrom-snoop's patch (its phase 2, a USB audio dongle on the host port) adds `USBAudioOut.{h,cpp}`, `isochronous.h` and `isoaudio.{h,c}`, and in `ehci.cpp` the isochronous OUT engine (siTDs, at the end), its refill in `isr()`, and `add_qh_to_periodic_schedule` stepping past siTDs to the QH tree.
+ 
+ ## License
+ 
+diff --git a/Source/Teensy/src/USBHost_t36/USBAudioOut.cpp b/Source/Teensy/src/USBHost_t36/USBAudioOut.cpp
+new file mode 100644
+index 0000000..24b290e
+--- /dev/null
++++ b/Source/Teensy/src/USBHost_t36/USBAudioOut.cpp
+@@ -0,0 +1,181 @@
++/* teensyrom-snoop: a USB Audio Class 1 output driver for USBHost_t36.  See USBAudioOut.h. */
++#include <Arduino.h>
++#include "USBAudioOut.h"
++
++#define print   USBHost::print_
++#define println USBHost::println_
++
++// setup steps; control() moves through them in order, skipping what the device does not have
++enum {
++	STEP_IDLE = 0,
++	STEP_SET_INTERFACE,   // select the alternate setting
++	STEP_SET_RATE,        // SET_CUR sampling frequency on the endpoint (only with more than one rate)
++	STEP_GET_MIN,         // the feature unit's volume range...
++	STEP_GET_MAX,
++	STEP_SET_VOLUME,      // ...0 dB clamped into it, on each channel that has volume
++	STEP_UNMUTE,          // mute off, on each channel that has mute
++	STEP_DONE
++};
++
++FLASHMEM void USBAudioOut::init()
++{
++	contribute_Transfers(transfers_, sizeof(transfers_) / sizeof(Transfer_t));
++	driver_ready_for_device(this);
++}
++
++FLASHMEM bool USBAudioOut::claim(Device_t *dev, int type, const uint8_t *d, uint32_t len)
++{
++	if (type == 0) {               // a new device: what an earlier one's AudioControl held is stale
++		ac_dev_ = NULL;
++		return false;
++	}
++	if (type != 1 || len < 9 || d[0] < 9 || d[1] != 4 || d[5] != 1) return false;   // audio interfaces only
++	if (d[6] == 1) {               // AudioControl: remember its units for the streaming interface after it
++		if (isoaudio_parse_control(d, len, &ac_)) ac_dev_ = dev;
++		return false;
++	}
++	isoaudio_stream_t s;
++	const int r = isoaudio_find_playback(d, len, RATE, &s);
++	if (r != ISOAUDIO_OK) {
++		if (r != ISOAUDIO_NOT_AS && r != ISOAUDIO_NO_OUT) last_reject_ = r;   // a playback interface we cannot drive
++		return false;
++	}
++	if (dev->speed != 0) {         // siTDs are full-speed only
++		println("USBAudioOut: not full speed");
++		return false;
++	}
++	println("USBAudioOut claim, interface ", s.iface);
++	as_ = s;
++	const isoaudio_unit_t *fu = ac_dev_ == dev ? isoaudio_feature_unit(&ac_, s.terminal) : NULL;
++	fu_ = fu ? fu->id : 0;
++	n_mute_ = (uint8_t)isoaudio_fu_channels(fu, 1, mute_ch_);
++	n_vol_ = (uint8_t)isoaudio_fu_channels(fu, 2, vol_ch_);
++	unmuted_ = false;
++	streaming_ = false;
++	failed_step_ = 0;
++	vol_min_ = vol_max_ = volume_ = 0;
++	last_reject_ = 0;
++	device = dev;                  // send() needs it before claim_drivers() sets it
++	step_ = STEP_SET_INTERFACE;
++	k_ = 0;
++	if (!send(0x01, 11, as_.alt, as_.iface, 0)) {   // SET_INTERFACE
++		step_ = -1;
++		failed_step_ = STEP_SET_INTERFACE;
++	}
++	return true;
++}
++
++FLASHMEM bool USBAudioOut::send(uint32_t type, uint32_t request, uint32_t value, uint32_t index, uint32_t length)
++{
++	mk_setup(setup_, type, request, value, index, length);
++	return queue_Control_Transfer(device, &setup_, length ? buf_ : NULL, this);
++}
++
++FLASHMEM void USBAudioOut::control(const Transfer_t *transfer)
++{
++	const bool ok = !(transfer->qtd.token & 0x40);   // a STALL halts the transfer
++	next_step(ok);
++}
++
++// After the request of step_ finished (ok or not): use its answer, send the next one.
++FLASHMEM void USBAudioOut::next_step(bool ok)
++{
++	const uint32_t ac_index = (uint32_t)fu_ << 8 | ac_.iface;
++	while (step_ > STEP_IDLE && step_ < STEP_DONE) {
++		switch (step_) {
++		case STEP_SET_INTERFACE:
++			if (!ok) {             // the device refused the alternate setting: no stream
++				failed_step_ = STEP_SET_INTERFACE;
++				step_ = -1;
++				return;
++			}
++			step_ = STEP_SET_RATE;
++			if (as_.freq_control && as_.rates != 1) {
++				buf_[0] = (uint8_t)RATE;
++				buf_[1] = (uint8_t)(RATE >> 8);
++				buf_[2] = (uint8_t)(RATE >> 16);
++				if (send(0x22, 0x01, 0x0100, as_.ep, 3)) return;   // SET_CUR SAMPLING_FREQ_CONTROL
++			}
++			ok = true;
++			break;
++		case STEP_SET_RATE:
++			if (!ok) failed_step_ = STEP_SET_RATE;   // carry on: the device may run 48 kHz anyway
++			streaming_ = usbhost_iso_out_start(device, as_.ep, FRAME_BYTES, fill_, ctx_);
++			println("USBAudioOut streaming ", streaming_);
++			step_ = STEP_GET_MIN;
++			if (n_vol_ && send(0xA1, 0x82, 0x0200 | vol_ch_[0], ac_index, 2)) return;   // GET_MIN VOLUME_CONTROL
++			step_ = STEP_SET_VOLUME;
++			k_ = n_vol_;           // no volume control: nothing to set
++			ok = false;
++			break;
++		case STEP_GET_MIN:
++			vol_min_ = ok ? (int16_t)(buf_[0] | buf_[1] << 8) : (int16_t)-32767;
++			step_ = STEP_GET_MAX;
++			if (send(0xA1, 0x83, 0x0200 | vol_ch_[0], ac_index, 2)) return;            // GET_MAX
++			ok = false;
++			break;
++		case STEP_GET_MAX:
++			vol_max_ = ok ? (int16_t)(buf_[0] | buf_[1] << 8) : 0;
++			volume_ = vol_min_ > 0 ? vol_min_ : vol_max_ < 0 ? vol_max_ : 0;
++			step_ = STEP_SET_VOLUME;
++			k_ = 0;
++			ok = true;
++			// fall through to send the first SET_CUR
++		case STEP_SET_VOLUME:
++			if (k_ > 0 && !ok) failed_step_ = STEP_SET_VOLUME;
++			if (k_ < n_vol_) {
++				buf_[0] = (uint8_t)volume_;
++				buf_[1] = (uint8_t)((uint16_t)volume_ >> 8);
++				if (send(0x21, 0x01, 0x0200 | vol_ch_[k_++], ac_index, 2)) return;     // SET_CUR VOLUME_CONTROL
++			}
++			step_ = STEP_UNMUTE;
++			k_ = 0;
++			ok = true;
++			break;
++		case STEP_UNMUTE:
++			if (k_ > 0) {
++				if (ok) unmuted_ = true;
++				else failed_step_ = STEP_UNMUTE;
++			}
++			if (k_ < n_mute_) {
++				buf_[0] = 0;
++				if (send(0x21, 0x01, 0x0100 | mute_ch_[k_++], ac_index, 1)) return;    // SET_CUR MUTE_CONTROL
++			}
++			step_ = STEP_DONE;
++			break;
++		}
++	}
++}
++
++FLASHMEM void USBAudioOut::disconnect()
++{
++	if (streaming_) usbhost_iso_out_stop();
++	streaming_ = false;
++	step_ = STEP_IDLE;
++	ac_dev_ = NULL;
++}
++
++FLASHMEM void USBAudioOut::info(Info *i)
++{
++	Device_t *dev = *(Device_t * volatile *)&device;
++	memset(i, 0, sizeof(*i));
++	i->attached = dev != NULL;
++	i->streaming = streaming_;
++	if (dev) {
++		i->vid = dev->idVendor;
++		i->pid = dev->idProduct;
++	}
++	i->iface = as_.iface;
++	i->alt = as_.alt;
++	i->ep = as_.ep;
++	i->sync = as_.sync;
++	i->fu = fu_;
++	i->step = step_;
++	i->failed_step = failed_step_;
++	i->volume = volume_;
++	i->vol_min = vol_min_;
++	i->vol_max = vol_max_;
++	i->unmuted = unmuted_;
++	i->last_reject = last_reject_;
++	usbhost_iso_out_stats(&i->iso);
++}
+diff --git a/Source/Teensy/src/USBHost_t36/USBAudioOut.h b/Source/Teensy/src/USBHost_t36/USBAudioOut.h
+new file mode 100644
+index 0000000..88095cf
+--- /dev/null
++++ b/Source/Teensy/src/USBHost_t36/USBAudioOut.h
+@@ -0,0 +1,69 @@
++/* teensyrom-snoop: a USB Audio Class 1 output driver for USBHost_t36 (phase 2 step 3, docs/USB-AUDIO.md in
++ * teensyrom-snoop).  MIT, as the rest of the patch; written from the USB Audio 1.0 specification.
++ *
++ * Claims only an AudioStreaming interface with an alternate setting that takes 16-bit stereo PCM at 48 kHz on
++ * an isochronous OUT endpoint (synchronous, adaptive or unsynchronised: no feedback endpoint), full speed only.
++ * Capture and HID interfaces of the same device are left to others.  It selects that alternate setting, sets
++ * the rate when the device offers more than one, starts the stream (isochronous.h: 48 stereo frames every 1 ms
++ * frame, asked of the fill function in the USBHS interrupt), then unmutes and sets 0 dB through the feature
++ * unit when there is one.  Unplugging stops the stream; plugging back in starts it again.
++ */
++#ifndef USB_AUDIO_OUT_H
++#define USB_AUDIO_OUT_H
++
++#include "USBHost_t36.h"
++#include "isochronous.h"
++#include "isoaudio.h"
++
++class USBAudioOut : public USBDriver {
++public:
++	enum { RATE = 48000, FRAME_BYTES = RATE / 1000 * 4 };   // 48 stereo frames of 16 bits: 192 bytes a frame
++
++	// fill gets FRAME_BYTES every frame (16-bit little endian, left then right), in the USBHS interrupt
++	USBAudioOut(USBHost &host, usbhost_iso_fill_t fill, void *ctx = NULL) : fill_(fill), ctx_(ctx) { init(); }
++
++	struct Info {
++		bool attached;           // a matching device is claimed
++		bool streaming;          // its siTDs are queued
++		uint16_t vid, pid;
++		uint8_t iface, alt, ep, sync, fu;
++		int8_t step;             // the setup step it is in (see control()); -1 when it failed there
++		uint8_t failed_step;
++		int16_t volume, vol_min, vol_max;   // 1/256 dB; volume is what was set (0 dB clamped to the range)
++		bool unmuted;
++		int last_reject;         // why the last AudioStreaming interface offered was not claimed (isoaudio.h)
++		usbhost_iso_stats_t iso;
++	};
++	void info(Info *i);
++
++protected:
++	virtual bool claim(Device_t *dev, int type, const uint8_t *descriptors, uint32_t len);
++	virtual void control(const Transfer_t *transfer);
++	virtual void disconnect();
++	void init();
++
++private:
++	void next_step(bool ok);
++	bool send(uint32_t type, uint32_t request, uint32_t value, uint32_t index, uint32_t length);
++
++	usbhost_iso_fill_t fill_;
++	void *ctx_;
++	setup_t setup_ __attribute__ ((aligned(16)));
++	uint8_t buf_[4] __attribute__ ((aligned(4)));
++	Transfer_t transfers_[3] __attribute__ ((aligned(32)));
++
++	Device_t *ac_dev_ = NULL;          // the device whose AudioControl interface ac_ holds
++	isoaudio_control_t ac_;
++	isoaudio_stream_t as_;
++	uint8_t fu_ = 0;
++	uint8_t mute_ch_[2], vol_ch_[2];
++	uint8_t n_mute_ = 0, n_vol_ = 0, k_ = 0;
++	volatile int8_t step_ = 0;
++	uint8_t failed_step_ = 0;
++	volatile bool streaming_ = false;
++	bool unmuted_ = false;
++	int16_t vol_min_ = 0, vol_max_ = 0, volume_ = 0;
++	int last_reject_ = 0;
++};
++
++#endif
+diff --git a/Source/Teensy/src/USBHost_t36/ehci.cpp b/Source/Teensy/src/USBHost_t36/ehci.cpp
+index 11cde9e..0989efb 100644
+--- a/Source/Teensy/src/USBHost_t36/ehci.cpp
++++ b/Source/Teensy/src/USBHost_t36/ehci.cpp
+@@ -23,6 +23,7 @@
+ 
+ #include <Arduino.h>
+ #include "USBHost_t36.h" // Read this header first for key info
++#include "isochronous.h" // teensyrom-snoop: isochronous OUT through siTDs, at the end of this file
+ 
+ // All USB EHCI controller hardware access is done from this file's code.
+ // Hardware services are made available to the rest of this library by
+@@ -328,6 +329,9 @@ void USBHost::isr()
+ 	if (stat & USBHS_USBSTS_TI1) println(" Timer1");
+ #endif
+ 
++	if (stat & (USBHS_USBSTS_UPI | USB_USBSTS_UI)) {
++		usbhost_iso_out_service(); // teensyrom-snoop: refill the siTDs first, the deadline is a frame away
++	}
+ 	if (stat & USBHS_USBSTS_UAI) { // completed qTD(s) from the async schedule
+ 		//println("Async Followup");
+ 		//print(async_followup_first, async_followup_last);
+@@ -1248,15 +1252,18 @@ void USBHost::add_qh_to_periodic_schedule(Pipe_t *pipe)
+ 		//print("    old slot ", i);
+ 		//print(": ");
+ 		//print_qh_list((Pipe_t *)(periodictable[i] & 0xFFFFFFE0));
+-		uint32_t num = periodictable[i];
++		// teensyrom-snoop: iTDs and siTDs come first in a slot; the QH tree starts after them.
++		// Every descriptor type keeps its next link in word 0.
++		volatile uint32_t *head = &periodictable[i];
++		while (!(*head & 1) && (*head & 6) != 2) head = (volatile uint32_t *)(*head & 0xFFFFFFE0);
++		uint32_t num = *head;
+ 		Pipe_t *node = (Pipe_t *)(num & 0xFFFFFFE0);
+ 		if ((num & 1) || ((num & 6) == 2 && node->periodic_interval < interval)) {
+ 			//println("  add to slot ", i);
+ 			pipe->qh.horizontal_link = num;
+-			periodictable[i] = (uint32_t)&(pipe->qh) | 2; // 2=QH
++			*head = (uint32_t)&(pipe->qh) | 2; // 2=QH
+ 		} else {
+ 			//println("  traverse list ", i);
+-			// TODO: skip past iTD, siTD when/if we support isochronous
+ 			while (node->periodic_interval >= interval) {
+ 				if (node == pipe) goto nextslot;
+ 				//print("  num ", num, HEX);
+@@ -1466,3 +1473,176 @@ void USBHost::delete_Pipe(Pipe_t *pipe)
+ }
+ 
+ 
++// teensyrom-snoop: isochronous OUT through siTDs (isochronous.h).  Phase 2 step 3 of teensyrom-snoop
++// (docs/USB-AUDIO.md there): a USB audio dongle on the host port.  Written from EHCI 1.0, section 3.4
++// (siTD) and 4.12.3 (split isochronous OUT).
++//
++// One siTD for each slot of the periodic frame list, linked first in the slot, ahead of the interrupt QHs
++// (add_qh_to_periodic_schedule steps past it).  A siTD goes out in the frame of its slot when active; the
++// refill (from isr(), on every siTD's interrupt-on-complete) keeps the next ISO_DEPTH frames queued.
++// The siTDs live in DTCM like the QHs: the QH scheduling code rewrites the link word of whatever precedes a
++// QH, a siTD included, so they must not sit behind the data cache.  The packet buffers are in RAM2, and
++// each is flushed from the cache after it is filled.
++#include "isoaudio.h"
++
++#define ISO_SLOTS  PERIODIC_LIST_SIZE  // one siTD per slot
++#define ISO_DEPTH  8                   // frames kept queued: the latency, and how late the refill may come
++#define ISO_BUF    256                 // bytes per packet buffer; 256-aligned, so a packet never crosses a 4 KB page
++#if ISO_DEPTH + 2 > ISO_SLOTS
++#error "ISO_DEPTH must leave room in the periodic list"
++#endif
++
++typedef struct {
++	volatile uint32_t w[8];        // EHCI siTD (7 words), padded to 32 bytes
++} siTD_t;
++
++static siTD_t iso_sitd[ISO_SLOTS] __attribute__ ((aligned(32)));
++DMAMEM static uint8_t iso_buf[ISO_SLOTS][ISO_BUF] __attribute__ ((aligned(256)));
++
++static struct {
++	Device_t *dev;
++	usbhost_iso_fill_t fill;
++	void *ctx;
++	uint32_t len;
++	uint32_t ep;
++	uint32_t shift;                // first microframe of the start-splits
++	uint32_t splits;
++	uint32_t stime;                // bandwidth per start-split, in uframe_bandwidth's units
++	uint32_t next;                 // the first slot not yet filled
++	uint32_t used;                 // bit n: slot n was queued since the start (its status counts)
++	bool running;
++} iso;
++static usbhost_iso_stats_t iso_stats;
++
++FLASHMEM bool usbhost_iso_out_start(Device_t *dev, uint32_t endpoint, uint32_t len, usbhost_iso_fill_t fill, void *ctx)
++{
++	if (iso.running || dev == NULL || dev->speed != 0 || fill == NULL || len == 0 || len > ISO_BUF) return false;
++	// bandwidth as allocate_interrupt_pipe_bandwidth() counts a full-speed OUT start-split: the payload
++	// (up to 188 bytes each) with worst-case bit stuffing, plus overhead, in 32-byte units
++	const uint32_t splits = isoaudio_splits(len);
++	const uint32_t payload = len < ISOAUDIO_SSPLIT_MAX ? len : ISOAUDIO_SSPLIT_MAX;
++	const uint32_t stime = (100 + 32 + ((payload * 76459) >> 16)) >> 5;
++	uint32_t best_shift = 0, best_bandwidth = 0xFFFFFFFF;
++	for (uint32_t shift = 0; shift + splits <= 6; shift++) {
++		uint32_t worst = 0;
++		for (uint32_t i = 0; i < PERIODIC_LIST_SIZE; i++) {
++			for (uint32_t k = 0; k < splits; k++) {
++				const uint32_t bw = uframe_bandwidth[(i << 3) + shift + k] + stime;
++				if (bw > worst) worst = bw;
++			}
++		}
++		if (worst < best_bandwidth) {
++			best_bandwidth = worst;
++			best_shift = shift;
++		}
++	}
++	println("iso_out_start: shift ", best_shift);
++	if (best_bandwidth > 187) return false; // as for interrupt pipes: at most 80% of a microframe
++
++	const bool irq_was_enabled = NVIC_IS_ENABLED(IRQ_USBHS);
++	NVIC_DISABLE_IRQ(IRQ_USBHS);
++	for (uint32_t i = 0; i < PERIODIC_LIST_SIZE; i++) {
++		for (uint32_t k = 0; k < splits; k++) uframe_bandwidth[(i << 3) + best_shift + k] += stime;
++	}
++	iso.dev = dev;
++	iso.fill = fill;
++	iso.ctx = ctx;
++	iso.len = len;
++	iso.ep = endpoint & 0x0F;
++	iso.shift = best_shift;
++	iso.splits = splits;
++	iso.stime = stime;
++	iso.used = 0;
++	memset(&iso_stats, 0, sizeof(iso_stats));
++	iso_stats.shift = best_shift;
++	for (uint32_t i = 0; i < ISO_SLOTS; i++) {
++		siTD_t *t = &iso_sitd[i];
++		t->w[0] = periodictable[i];    // first in the slot: whatever was there follows it
++		for (uint32_t k = 1; k < 8; k++) t->w[k] = 0;
++		t->w[6] = 1;                   // back pointer: none
++		__asm__ volatile("dsb" ::: "memory");
++		periodictable[i] = (uint32_t)t | 4; // 4 = siTD, inactive until filled
++	}
++	iso.next = ((USBHS_FRINDEX >> 3) + 2) & (ISO_SLOTS - 1);
++	iso.running = true;
++	iso_stats.running = 1;
++	USBHS_USBINTR |= USB_USBINTR_UE;   // a siTD's interrupt-on-complete, should the controller not flag it as periodic (UPI)
++	usbhost_iso_out_service();
++	if (irq_was_enabled) NVIC_ENABLE_IRQ(IRQ_USBHS);
++	return true;
++}
++
++FLASHMEM void usbhost_iso_out_stop(void)
++{
++	const bool irq_was_enabled = NVIC_IS_ENABLED(IRQ_USBHS);
++	NVIC_DISABLE_IRQ(IRQ_USBHS);
++	if (iso.running) {
++		iso.running = false;
++		iso_stats.running = 0;
++		for (uint32_t i = 0; i < ISO_SLOTS; i++) {
++			siTD_t *t = &iso_sitd[i];
++			t->w[3] = 0;                // inactive, should the controller still reach it this frame
++			volatile uint32_t *link = &periodictable[i];
++			while (!(*link & 1)) {      // every descriptor type has its next link in word 0
++				if ((*link & 0xFFFFFFE0) == (uint32_t)t) {
++					*link = t->w[0];
++					break;
++				}
++				link = (volatile uint32_t *)(*link & 0xFFFFFFE0);
++			}
++			for (uint32_t k = 0; k < iso.splits; k++) uframe_bandwidth[(i << 3) + iso.shift + k] -= iso.stime;
++		}
++		iso.dev = NULL;
++	}
++	if (irq_was_enabled) NVIC_ENABLE_IRQ(IRQ_USBHS);
++}
++
++FLASHMEM void usbhost_iso_out_stats(usbhost_iso_stats_t *s)
++{
++	const bool irq_was_enabled = NVIC_IS_ENABLED(IRQ_USBHS);
++	NVIC_DISABLE_IRQ(IRQ_USBHS);
++	*s = iso_stats;
++	if (irq_was_enabled) NVIC_ENABLE_IRQ(IRQ_USBHS);
++}
++
++// The refill: in the USBHS interrupt (RAM1, like the rest of isr()).
++void usbhost_iso_out_service(void)
++{
++	if (!iso.running) return;
++	const uint32_t cur = (USBHS_FRINDEX >> 3) & (ISO_SLOTS - 1);
++	uint32_t missed;
++	uint32_t n = isoaudio_plan(cur, &iso.next, ISO_SLOTS, ISO_DEPTH, &missed);
++	iso_stats.missed += missed;
++	const Device_t *dev = iso.dev;
++	while (n--) {
++		const uint32_t s = iso.next;
++		siTD_t *t = &iso_sitd[s];
++		const uint32_t st = t->w[3];
++		if (st & ISOAUDIO_SITD_ACTIVE) break; // not gone yet: the controller is behind, try on the next interrupt
++		if (iso.used & (1u << s)) {
++			if (st & ISOAUDIO_SITD_ERRORS) {
++				iso_stats.errors++;
++				iso_stats.status = st & 0xFF;
++			} else {
++				iso_stats.frames++;
++			}
++		}
++		uint8_t *buf = iso_buf[s];
++		iso.fill(iso.ctx, buf, iso.len);
++		arm_dcache_flush(buf, iso.len);
++		uint32_t w[7];
++		isoaudio_sitd_out(w, dev->address, iso.ep, dev->hub_address, dev->hub_port, iso.shift,
++			(uint32_t)buf, iso.len, 1);
++		t->w[1] = w[1];
++		t->w[2] = w[2];
++		t->w[4] = w[4];
++		t->w[5] = w[5];
++		t->w[6] = w[6];
++		__asm__ volatile("dsb" ::: "memory");
++		t->w[3] = w[3];                    // active last
++		iso.used |= 1u << s;
++		iso.next = (s + 1) & (ISO_SLOTS - 1);
++	}
++}
++
++
+diff --git a/Source/Teensy/src/USBHost_t36/isoaudio.c b/Source/Teensy/src/USBHost_t36/isoaudio.c
+new file mode 100644
+index 0000000..33bc6c9
+--- /dev/null
++++ b/Source/Teensy/src/USBHost_t36/isoaudio.c
+@@ -0,0 +1,288 @@
++/* teensyrom-snoop: isochronous audio OUT, the portable half.  See isoaudio.h. */
++#include "isoaudio.h"
++
++#include <string.h>
++
++/* descriptor types and audio class codes (USB 2.0 chapter 9, USB Audio 1.0 appendix A) */
++#define DT_INTERFACE     4
++#define DT_ENDPOINT      5
++#define DT_IAD           11
++#define DT_CS_INTERFACE  0x24
++#define DT_CS_ENDPOINT   0x25
++#define AC_HEADER        1
++#define AC_INPUT         2
++#define AC_OUTPUT        3
++#define AC_MIXER         4
++#define AC_SELECTOR      5
++#define AC_FEATURE       6
++#define AC_PROCESSING    7
++#define AC_EXTENSION     8
++#define AS_GENERAL       1
++#define AS_FORMAT_TYPE   2
++#define EP_GENERAL       1
++
++static ISOAUDIO_COLD uint32_t le16(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8; }
++static ISOAUDIO_COLD uint32_t le24(const uint8_t *p) { return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16; }
++
++/* the next descriptor, or NULL at the end or on a malformed length */
++static ISOAUDIO_COLD const uint8_t *next_desc(const uint8_t *p, const uint8_t *end)
++{
++   if (p[0] < 2) return NULL;
++   p += p[0];
++   if (p + 2 > end || p + p[0] > end || p[0] < 2) return NULL;
++   return p;
++}
++
++ISOAUDIO_COLD int isoaudio_parse_control(const uint8_t *d, uint32_t len, isoaudio_control_t *ac)
++{
++   const uint8_t *end = d + len;
++   memset(ac, 0, sizeof *ac);
++   if (len < 9 || d[0] < 9 || d[1] != DT_INTERFACE || d[5] != 1 || d[6] != 1) return 0;
++   ac->iface = d[2];
++   for (const uint8_t *p = next_desc(d, end); p; p = next_desc(p, end))
++   {
++      if (p[1] == DT_INTERFACE || p[1] == DT_IAD) break;
++      if (p[1] != DT_CS_INTERFACE || p[0] < 4 || ac->n >= ISOAUDIO_MAX_UNITS) continue;
++      isoaudio_unit_t u;
++      memset(&u, 0, sizeof u);
++      u.subtype = p[2];
++      u.id = p[3];
++      switch (p[2])
++      {
++      case AC_INPUT:                    /* bTerminalID wTerminalType bAssocTerminal bNrChannels ... */
++         if (p[0] < 12) continue;
++         u.type = (uint16_t)le16(p + 4);
++         break;
++      case AC_OUTPUT:                   /* bTerminalID wTerminalType bAssocTerminal bSourceID iTerminal */
++         if (p[0] < 9) continue;
++         u.type = (uint16_t)le16(p + 4);
++         u.nsrc = 1;
++         u.src[0] = p[7];
++         break;
++      case AC_MIXER:                    /* bUnitID bNrInPins baSourceID[] ... */
++      case AC_SELECTOR:
++         if (p[0] < 5 || p[0] < 5u + p[4]) continue;
++         for (uint8_t i = 0; i < p[4] && i < 4; i++) u.src[u.nsrc++] = p[5 + i];
++         break;
++      case AC_FEATURE:                  /* bUnitID bSourceID bControlSize bmaControls[ch+1] iFeature */
++      {
++         if (p[0] < 7 || p[5] == 0) continue;
++         const uint8_t size = p[5];
++         const uint32_t nctl = (uint32_t)(p[0] - 7) / size;   /* master + logical channels */
++         u.nsrc = 1;
++         u.src[0] = p[4];
++         u.ctl_master = p[6];
++         if (nctl > 1) u.ctl_ch[0] = p[6 + size];
++         if (nctl > 2) u.ctl_ch[1] = p[6 + 2 * size];
++         break;
++      }
++      case AC_PROCESSING:               /* bUnitID wProcessType bNrInPins baSourceID[] ... */
++      case AC_EXTENSION:
++         if (p[0] < 7 || p[0] < 7u + p[6]) continue;
++         for (uint8_t i = 0; i < p[6] && i < 4; i++) u.src[u.nsrc++] = p[7 + i];
++         break;
++      default:                          /* the header, or something this parser does not follow */
++         continue;
++      }
++      ac->unit[ac->n++] = u;
++   }
++   return 1;
++}
++
++/* one alternate setting: d at its interface descriptor; s gets what it offers.  Returns its verdict. */
++static ISOAUDIO_COLD int check_alt(const uint8_t *d, const uint8_t *end, uint32_t rate, isoaudio_stream_t *s)
++{
++   int pcm = 0, format = 0, out = 0;
++   memset(s, 0, sizeof *s);
++   s->iface = d[2];
++   s->alt = d[3];
++   for (const uint8_t *p = next_desc(d, end); p; p = next_desc(p, end))
++   {
++      if (p[1] == DT_INTERFACE || p[1] == DT_IAD) break;
++      if (p[1] == DT_CS_INTERFACE && p[2] == AS_GENERAL && p[0] >= 7)
++      {  /* bTerminalLink bDelay wFormatTag */
++         s->terminal = p[3];
++         pcm = le16(p + 5) == 0x0001;
++      }
++      else if (p[1] == DT_CS_INTERFACE && p[2] == AS_FORMAT_TYPE && p[0] >= 8 && p[3] == 1)
++      {  /* Type I: bNrChannels bSubframeSize bBitResolution bSamFreqType tSamFreq[] */
++         s->channels = p[4];
++         s->subframe = p[5];
++         s->bits = p[6];
++         s->rates = p[7];
++         int has = 0;
++         if (p[7] == 0)
++            has = p[0] >= 14 && le24(p + 8) <= rate && rate <= le24(p + 11);
++         else
++            for (uint32_t i = 0; i < p[7] && 8u + 3 * i + 3 <= p[0]; i++) has |= le24(p + 8 + 3 * i) == rate;
++         format = has && p[4] == 2 && p[5] == 2 && p[6] == 16;
++      }
++      else if (p[1] == DT_ENDPOINT && p[0] >= 7 && (p[3] & 3) == 1 && !(p[2] & 0x80) && !s->ep)
++      {  /* bEndpointAddress bmAttributes wMaxPacketSize bInterval: the first isochronous OUT endpoint */
++         s->ep = p[2];
++         s->sync = (uint8_t)((p[3] >> 2) & 3);
++         s->max_packet = (uint16_t)(le16(p + 4) & 0x7FF);
++         s->interval = p[6];
++         out = 1;
++      }
++      else if (p[1] == DT_CS_ENDPOINT && p[2] == EP_GENERAL && p[0] >= 4 && out)
++         s->freq_control = p[3] & 1;
++   }
++   if (!out) return ISOAUDIO_NO_OUT;
++   if (!pcm || !format) return ISOAUDIO_NO_FORMAT;
++   if (s->sync == ISOAUDIO_SYNC_ASYNC) return ISOAUDIO_ASYNC;
++   if (s->max_packet < (rate + 999) / 1000 * 4) return ISOAUDIO_SMALL;
++   return ISOAUDIO_OK;
++}
++
++ISOAUDIO_COLD int isoaudio_find_playback(const uint8_t *d, uint32_t len, uint32_t rate, isoaudio_stream_t *s)
++{
++   const uint8_t *end = d + len;
++   memset(s, 0, sizeof *s);
++   if (len < 9 || d[0] < 9 || d[1] != DT_INTERFACE || d[5] != 1 || d[6] != 2) return ISOAUDIO_NOT_AS;
++   const uint8_t iface = d[2];
++   int best = ISOAUDIO_NO_OUT;
++   for (const uint8_t *p = d; p; p = next_desc(p, end))
++   {
++      if (p[1] == DT_IAD) break;
++      if (p[1] != DT_INTERFACE || p[0] < 9) continue;
++      if (p[2] != iface) break;   /* the next interface: its alternate settings are its own */
++      isoaudio_stream_t t;
++      const int r = check_alt(p, end, rate, &t);
++      if (r == ISOAUDIO_OK) { *s = t; return r; }
++      if (r < best) { best = r; *s = t; }   /* the most specific reason: FORMAT before OUT, ASYNC before FORMAT ... */
++   }
++   return best;
++}
++
++ISOAUDIO_COLD const isoaudio_unit_t *isoaudio_feature_unit(const isoaudio_control_t *ac, uint8_t terminal)
++{
++   uint8_t id = terminal;
++   for (int hop = 0; hop < 8; hop++)
++   {
++      const isoaudio_unit_t *down = NULL;
++      for (uint8_t i = 0; i < ac->n && !down; i++)
++      {
++         const isoaudio_unit_t *u = &ac->unit[i];
++         if (u->subtype == AC_INPUT || u->subtype == AC_OUTPUT) continue;
++         for (uint8_t k = 0; k < u->nsrc; k++) if (u->src[k] == id) { down = u; break; }
++      }
++      if (!down) return NULL;
++      if (down->subtype == AC_FEATURE) return down;
++      id = down->id;
++   }
++   return NULL;
++}
++
++ISOAUDIO_COLD int isoaudio_fu_channels(const isoaudio_unit_t *fu, uint8_t control_bit, uint8_t ch[2])
++{
++   int n = 0;
++   if (!fu) return 0;
++   if (fu->ctl_master & control_bit) { ch[0] = 0; return 1; }
++   for (uint8_t i = 0; i < 2; i++) if (fu->ctl_ch[i] & control_bit) ch[n++] = (uint8_t)(i + 1);
++   return n;
++}
++
++/* ---- siTD ------------------------------------------------------------------------------------------- */
++
++ISOAUDIO_COLD uint32_t isoaudio_splits(uint32_t len)
++{
++   return len == 0 ? 1 : (len + ISOAUDIO_SSPLIT_MAX - 1) / ISOAUDIO_SSPLIT_MAX;
++}
++
++ISOAUDIO_COLD int isoaudio_sitd_out(uint32_t w[7], uint8_t dev_addr, uint8_t ep, uint8_t hub_addr, uint8_t hub_port,
++                                    uint32_t shift, uint32_t buf, uint32_t len, int ioc)
++{
++   const uint32_t splits = isoaudio_splits(len);
++   if (len > 1023 || shift + splits > 6) return -1;   /* the last start-split no later than microframe 5 */
++   /* word 1: direction (0 OUT), port number, hub address, endpoint, device address */
++   w[1] = (uint32_t)(hub_port & 0x7F) << 24 | (uint32_t)(hub_addr & 0x7F) << 16 | (uint32_t)(ep & 0x0F) << 8 | (dev_addr & 0x7F);
++   /* word 2: complete-split mask 0 (OUT has none), start-split mask: `splits` microframes from `shift` */
++   w[2] = ((1u << splits) - 1) << shift;
++   /* word 3: interrupt on complete, page select 0, total bytes, status active */
++   w[3] = (ioc ? 0x80000000u : 0) | len << 16 | ISOAUDIO_SITD_ACTIVE;
++   /* word 4: page 0 and current offset; word 5: page 1, transaction position (all / begin) and T-count */
++   w[4] = buf;
++   w[5] = ((buf & 0xFFFFF000u) + 0x1000u) | (splits > 1 ? 1u << 3 : 0u) | splits;
++   /* word 6: back pointer, unused (T set) */
++   w[6] = 1;
++   return 0;
++}
++
++ISOAUDIO_COLD uint32_t isoaudio_plan(uint32_t cur, uint32_t *next, uint32_t size, uint32_t depth, uint32_t *missed)
++{
++   const uint32_t mask = size - 1;
++   uint32_t ahead = (*next - cur) & mask;
++   *missed = 0;
++   if (ahead < 2 || ahead > depth + 1)
++   {  /* frames cur+1 .. (the old next) went out with nothing queued: start again at cur+2 */
++      const uint32_t resume = (cur + 2) & mask;
++      *missed = (resume - *next) & mask;
++      *next = resume;
++      ahead = 2;
++   }
++   return depth + 1 - ahead;
++}
++
++/* ---- sample sources ------------------------------------------------------------------------------------- */
++
++/* a quarter of a sine, 256 steps, peak 32767 (round(32767 * sin(pi/2 * i/256))) */
++static const int16_t quarter_sine[257] ISOAUDIO_ROM = {
++       0,   201,   402,   603,   804,  1005,  1206,  1407,  1608,  1809,  2009,  2210,
++    2410,  2611,  2811,  3012,  3212,  3412,  3612,  3811,  4011,  4210,  4410,  4609,
++    4808,  5007,  5205,  5404,  5602,  5800,  5998,  6195,  6393,  6590,  6786,  6983,
++    7179,  7375,  7571,  7767,  7962,  8157,  8351,  8545,  8739,  8933,  9126,  9319,
++    9512,  9704,  9896, 10087, 10278, 10469, 10659, 10849, 11039, 11228, 11417, 11605,
++   11793, 11980, 12167, 12353, 12539, 12725, 12910, 13094, 13279, 13462, 13645, 13828,
++   14010, 14191, 14372, 14553, 14732, 14912, 15090, 15269, 15446, 15623, 15800, 15976,
++   16151, 16325, 16499, 16673, 16846, 17018, 17189, 17360, 17530, 17700, 17869, 18037,
++   18204, 18371, 18537, 18703, 18868, 19032, 19195, 19357, 19519, 19680, 19841, 20000,
++   20159, 20317, 20475, 20631, 20787, 20942, 21096, 21250, 21403, 21554, 21705, 21856,
++   22005, 22154, 22301, 22448, 22594, 22739, 22884, 23027, 23170, 23311, 23452, 23592,
++   23731, 23870, 24007, 24143, 24279, 24413, 24547, 24680, 24811, 24942, 25072, 25201,
++   25329, 25456, 25582, 25708, 25832, 25955, 26077, 26198, 26319, 26438, 26556, 26674,
++   26790, 26905, 27019, 27133, 27245, 27356, 27466, 27575, 27683, 27790, 27896, 28001,
++   28105, 28208, 28310, 28411, 28510, 28609, 28706, 28803, 28898, 28992, 29085, 29177,
++   29268, 29358, 29447, 29534, 29621, 29706, 29791, 29874, 29956, 30037, 30117, 30195,
++   30273, 30349, 30424, 30498, 30571, 30643, 30714, 30783, 30852, 30919, 30985, 31050,
++   31113, 31176, 31237, 31297, 31356, 31414, 31470, 31526, 31580, 31633, 31685, 31736,
++   31785, 31833, 31880, 31926, 31971, 32014, 32057, 32098, 32137, 32176, 32213, 32250,
++   32285, 32318, 32351, 32382, 32412, 32441, 32469, 32495, 32521, 32545, 32567, 32589,
++   32609, 32628, 32646, 32663, 32678, 32692, 32705, 32717, 32728, 32737, 32745, 32752,
++   32757, 32761, 32765, 32766, 32767};
++
++/* sine at step i of 1024 */
++static ISOAUDIO_COLD int32_t sine1024(uint32_t i)
++{
++   i &= 1023;
++   const uint32_t q = i >> 8, k = i & 255;
++   const int32_t v = (q & 1) ? quarter_sine[256 - k] : quarter_sine[k];
++   return q & 2 ? -v : v;
++}
++
++ISOAUDIO_COLD void isoaudio_tone_init(isoaudio_tone_t *t, uint32_t hz, uint32_t rate, int32_t amp)
++{
++   t->phase = 0;
++   t->step = rate ? (uint32_t)((((uint64_t)hz << 32) + rate / 2) / rate) : 0;
++   t->amp = amp < 0 ? 0 : amp > 32767 ? 32767 : amp;
++}
++
++ISOAUDIO_COLD int16_t isoaudio_tone_next(isoaudio_tone_t *t)
++{
++   const uint32_t i = t->phase >> 22, frac = (t->phase >> 6) & 0xFFFF;
++   const int32_t a = sine1024(i), b = sine1024(i + 1);
++   const int32_t s = a + (int32_t)(((int64_t)(b - a) * (int32_t)frac) >> 16);
++   t->phase += t->step;
++   return (int16_t)((s * t->amp) / 32767);
++}
++
++ISOAUDIO_COLD void isoaudio_tone_packet(isoaudio_tone_t *t, uint8_t *pkt, uint32_t frames)
++{
++   for (uint32_t i = 0; i < frames; i++)
++   {
++      const uint16_t v = (uint16_t)isoaudio_tone_next(t);
++      pkt[0] = pkt[2] = (uint8_t)v;
++      pkt[1] = pkt[3] = (uint8_t)(v >> 8);
++      pkt += 4;
++   }
++}
+diff --git a/Source/Teensy/src/USBHost_t36/isoaudio.h b/Source/Teensy/src/USBHost_t36/isoaudio.h
+new file mode 100644
+index 0000000..ff62b81
+--- /dev/null
++++ b/Source/Teensy/src/USBHost_t36/isoaudio.h
+@@ -0,0 +1,150 @@
++/* teensyrom-snoop: isochronous audio OUT on the USB host port, the portable half (phase 2 step 3,
++ * docs/USB-AUDIO.md).  Copied into the TeensyROM tree as src/USBHost_t36/isoaudio.{h,c} by
++ * tools/make_tr_patch.py; host-tested through ctypes (tests/test_usbaudio.py).
++ *
++ *   - USB Audio Class 1 descriptor parsing: the AudioControl units, and the AudioStreaming alternate
++ *     setting that takes 16-bit stereo PCM at a given rate on an isochronous OUT endpoint.
++ *   - siTD words (EHCI 1.0 section 3.4) for one full-speed isochronous OUT packet, and the frame plan:
++ *     which periodic-list slots to fill so the controller always has a few frames queued.
++ *   - Sample sources: a sine test tone (integer only, the same samples on the host and the Teensy)
++ *     and silence, written as 16-bit little-endian stereo packets.
++ *
++ * Plain C99, also compiled as C++ (keep it C++-clean).  No hardware access, no allocation.
++ * MIT, as the rest of the patch.  Written from the USB Audio 1.0 and EHCI 1.0 specifications.
++ */
++#ifndef ISOAUDIO_H
++#define ISOAUDIO_H
++
++#include <stdint.h>
++#include <stddef.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Teensy 4: setup code to flash (code defaults to RAM1 there, which is scarce); data tables too. */
++#ifndef ISOAUDIO_COLD
++#if defined(__IMXRT1062__)
++#define ISOAUDIO_COLD __attribute__((section(".flashmem")))
++#else
++#define ISOAUDIO_COLD
++#endif
++#endif
++#ifndef ISOAUDIO_ROM
++#if defined(__IMXRT1062__)
++#define ISOAUDIO_ROM __attribute__((section(".progmem")))
++#else
++#define ISOAUDIO_ROM
++#endif
++#endif
++
++#define ISOAUDIO_MAX_UNITS 16      /* AudioControl terminals and units remembered */
++
++/* isoaudio_find_playback results */
++enum {
++   ISOAUDIO_OK        = 1,
++   ISOAUDIO_NOT_AS    = 0,     /* not an AudioStreaming interface */
++   ISOAUDIO_NO_OUT    = -1,    /* no alternate setting with an isochronous OUT endpoint (a capture interface) */
++   ISOAUDIO_NO_FORMAT = -2,    /* OUT, but no 16-bit stereo PCM at the rate */
++   ISOAUDIO_ASYNC     = -3,    /* the only match is an asynchronous sink (needs a feedback endpoint: not supported) */
++   ISOAUDIO_SMALL     = -4     /* the endpoint's wMaxPacketSize cannot carry one frame's samples */
++};
++
++/* endpoint synchronisation type, bmAttributes bits 3-2 */
++enum { ISOAUDIO_SYNC_NONE = 0, ISOAUDIO_SYNC_ASYNC = 1, ISOAUDIO_SYNC_ADAPTIVE = 2, ISOAUDIO_SYNC_SYNC = 3 };
++
++typedef struct {
++   uint8_t  iface, alt;        /* AudioStreaming interface number and the alternate setting to select */
++   uint8_t  ep;                /* endpoint address (bit 7 clear: OUT) */
++   uint8_t  interval;          /* bInterval (full speed: frames, 1 for audio) */
++   uint16_t max_packet;        /* wMaxPacketSize */
++   uint8_t  sync;              /* ISOAUDIO_SYNC_* */
++   uint8_t  terminal;          /* bTerminalLink: the AudioControl input terminal this stream feeds */
++   uint8_t  rates;             /* bSamFreqType: number of discrete rates, 0 = a continuous range */
++   uint8_t  freq_control;      /* the class-specific endpoint has a sampling frequency control */
++   uint8_t  channels, subframe, bits;
++} isoaudio_stream_t;
++
++typedef struct {
++   uint8_t id;
++   uint8_t subtype;            /* 2 input terminal, 3 output terminal, 4 mixer, 5 selector, 6 feature unit, ... */
++   uint8_t nsrc;               /* sources remembered (up to 4) */
++   uint8_t src[4];
++   uint8_t ctl_master;         /* feature unit: bmaControls(0), low byte (bit 0 mute, bit 1 volume) */
++   uint8_t ctl_ch[2];          /* feature unit: bmaControls(1), (2), low byte */
++   uint16_t type;              /* terminals: wTerminalType */
++} isoaudio_unit_t;
++
++typedef struct {
++   uint8_t iface;              /* the AudioControl interface number (wIndex low byte of unit requests) */
++   uint8_t n;
++   isoaudio_unit_t unit[ISOAUDIO_MAX_UNITS];
++} isoaudio_control_t;
++
++/* d points at an interface descriptor, len bytes to the end of the configuration.
++ * isoaudio_parse_control: 1 when it is an AudioControl interface (class 1, subclass 1); its terminals and
++ * units are read into ac (up to the next interface descriptor). */
++int isoaudio_parse_control(const uint8_t *d, uint32_t len, isoaudio_control_t *ac);
++
++/* An AudioStreaming interface (class 1, subclass 2): the first alternate setting of this interface number
++ * with an isochronous OUT endpoint taking Type I PCM, 2 channels of 16 bits (2-byte subframes) at rate Hz
++ * (a discrete rate or within a continuous range), a packet of at least rate/1000 frames, and a synchronous,
++ * adaptive or unsynchronised endpoint.  Returns ISOAUDIO_OK and fills s, or why not (the enum above). */
++int isoaudio_find_playback(const uint8_t *d, uint32_t len, uint32_t rate, isoaudio_stream_t *s);
++
++/* The feature unit downstream of input terminal `terminal` (through at most 8 units: mixers, selectors,
++ * processing units), or NULL. */
++const isoaudio_unit_t *isoaudio_feature_unit(const isoaudio_control_t *ac, uint8_t terminal);
++
++/* Which channels of a feature unit to address for a control bit (1 mute, 2 volume): {0} when the master
++ * channel has it, else those of channels 1-2 that have it.  Returns the count, channels in ch[]. */
++int isoaudio_fu_channels(const isoaudio_unit_t *fu, uint8_t control_bit, uint8_t ch[2]);
++
++/* ---- siTD (EHCI split-transaction isochronous transfer descriptor) ----------------------------------- */
++
++#define ISOAUDIO_SSPLIT_MAX 188    /* bytes one OUT start-split carries (EHCI 4.12.3.1) */
++
++/* Words 1-6 of a siTD for one full-speed isochronous OUT packet of len bytes (1-1023) at buffer address buf
++ * (in 32-bit DMA space), starting its start-splits in microframe `shift`.  Word 0 (the next link) is left
++ * alone.  Word 3 is the active transfer state with interrupt-on-complete if ioc.  Returns 0, or -1 when the
++ * splits do not fit before microframe 7 (the controller needs the last one free). */
++int isoaudio_sitd_out(uint32_t w[7], uint8_t dev_addr, uint8_t ep, uint8_t hub_addr, uint8_t hub_port,
++                      uint32_t shift, uint32_t buf, uint32_t len, int ioc);
++
++/* start-splits one OUT packet of len bytes needs (the siTD's T-count) */
++uint32_t isoaudio_splits(uint32_t len);
++
++/* siTD status byte (word 3, bits 7-0) */
++#define ISOAUDIO_SITD_ACTIVE   0x80
++#define ISOAUDIO_SITD_ERRORS   0x7C    /* ERR, data buffer error, babble, transaction error, missed microframe */
++
++/* The frame plan.  cur: the periodic-list slot the controller is in; *next: the first slot not yet filled;
++ * size: the list's length (a power of two); depth: frames to keep queued.  Slots cur+2 .. cur+depth are kept
++ * filled (cur+1 may already be fetched).  Returns how many slots to fill from *next on.  When the queue ran
++ * dry (the refill came too late), *next moves to cur+2 and *missed is the number of frames that went out
++ * with nothing queued; else *missed is 0. */
++uint32_t isoaudio_plan(uint32_t cur, uint32_t *next, uint32_t size, uint32_t depth, uint32_t *missed);
++
++/* ---- sample sources ------------------------------------------------------------------------------------- */
++
++typedef struct {
++   uint32_t phase;             /* 2^32 = one period */
++   uint32_t step;              /* phase per sample */
++   int32_t  amp;               /* peak, 0-32767 */
++} isoaudio_tone_t;
++
++/* hz at rate samples a second, peak amp (0-32767) */
++void isoaudio_tone_init(isoaudio_tone_t *t, uint32_t hz, uint32_t rate, int32_t amp);
++
++/* The next sample (a 1024-step sine, linearly interpolated: spurs ~-90 dB at -12 dBFS), phase moved on. */
++int16_t isoaudio_tone_next(isoaudio_tone_t *t);
++
++/* frames stereo frames (both channels the same), 16-bit little endian: 4 * frames bytes to pkt.
++ * Packets written one after another continue the phase exactly. */
++void isoaudio_tone_packet(isoaudio_tone_t *t, uint8_t *pkt, uint32_t frames);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/Source/Teensy/src/USBHost_t36/isochronous.h b/Source/Teensy/src/USBHost_t36/isochronous.h
+new file mode 100644
+index 0000000..4312461
+--- /dev/null
++++ b/Source/Teensy/src/USBHost_t36/isochronous.h
+@@ -0,0 +1,43 @@
++/* teensyrom-snoop: isochronous OUT for USBHost_t36 (phase 2 step 3, docs/USB-AUDIO.md in teensyrom-snoop).
++ *
++ * One stream at a time to a full-speed device: one packet every 1 ms frame, through siTDs (EHCI split
++ * transaction isochronous descriptors) linked first in every slot of the periodic frame list, ahead of the
++ * interrupt QHs that MIDI and HID use.  The controller's interrupt refills the ring: each packet is asked of
++ * the caller's fill function a few frames before it goes out, so the latency is ISO_DEPTH frames.
++ *
++ * The implementation is at the end of ehci.cpp (it uses the periodic list and the bandwidth table there).
++ * The fill function runs in the USBHS interrupt, below the TeensyROM's phi2 interrupt.
++ */
++#ifndef USBHOST_ISOCHRONOUS_H
++#define USBHOST_ISOCHRONOUS_H
++
++#include <stdint.h>
++
++typedef struct Device_struct Device_t;
++
++/* Fill packet with len bytes, for the frame it goes out in.  Called from the USBHS interrupt. */
++typedef void (*usbhost_iso_fill_t)(void *ctx, uint8_t *packet, uint32_t len);
++
++typedef struct {
++   uint32_t frames;     /* packets sent without an error */
++   uint32_t errors;     /* packets the controller flagged (transaction error, babble, buffer error, missed microframe) */
++   uint32_t missed;     /* frames that went out with nothing queued: the refill came too late */
++   uint32_t status;     /* the last flagged siTD status byte (0 when none) */
++   uint32_t shift;      /* the microframe the start-splits begin in */
++   uint8_t  running;
++} usbhost_iso_stats_t;
++
++/* Start streaming len bytes (1-256) every frame to OUT endpoint `endpoint` (number only) of a full-speed
++ * device.  Fails when one already runs, the device is not full speed, or no microframes have room. */
++bool usbhost_iso_out_start(Device_t *dev, uint32_t endpoint, uint32_t len, usbhost_iso_fill_t fill, void *ctx);
++
++/* Stop and unlink the siTDs (the driver's disconnect(), or any time: it masks the USBHS interrupt itself). */
++void usbhost_iso_out_stop(void);
++
++/* A copy of the counters, for reports */
++void usbhost_iso_out_stats(usbhost_iso_stats_t *s);
++
++/* The refill, from USBHost::isr() */
++void usbhost_iso_out_service(void);
++
 +#endif

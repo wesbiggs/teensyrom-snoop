@@ -7,7 +7,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
-PROTO_VERSION = 5
+PROTO_VERSION = 6
 
 F_HELLO, F_WRITES, F_STATUS, F_BYE = 0x01, 0x02, 0x03, 0x04
 BYE_REASONS = {0: "stopped", 1: "replaced", 2: "channel"}
@@ -15,7 +15,8 @@ BYE_REASONS = {0: "stopped", 1: "replaced", 2: "channel"}
 # TeensyROM command channel
 CMD_LEAD = 0x64
 CMD_SNOOP = 0x53            # token 0x6453 ('d' 'S')
-OP_STOP, OP_START, OP_STATUS = 0, 1, 2
+OP_STOP, OP_START, OP_STATUS, OP_AUDIO = 0, 1, 2, 3
+AUDIO_SILENCE, AUDIO_TONE, AUDIO_REPORT = 0, 1, 2   # OP_AUDIO's mode byte (version 6)
 ACK = bytes([0xCC, 0x64])   # AckToken 0x64CC, sent low byte first
 FAIL = bytes([0x7F, 0x9B])  # FailToken 0x9B7F
 
@@ -295,6 +296,14 @@ def stop_command() -> bytes:
 
 def status_command() -> bytes:
     return bytes([CMD_LEAD, CMD_SNOOP, OP_STATUS])
+
+
+def audio_command(mode: int) -> bytes:
+    """The USB audio dongle on the TeensyROM's host port (version 6, firmware 0.9-sn8+): AUDIO_SILENCE,
+    AUDIO_TONE (1 kHz, -12 dBFS) or AUDIO_REPORT (no change).  Answered with Ack and one line of text."""
+    if mode not in (AUDIO_SILENCE, AUDIO_TONE, AUDIO_REPORT):
+        raise ValueError("mode 0 silence, 1 tone, 2 report")
+    return bytes([CMD_LEAD, CMD_SNOOP, OP_AUDIO, mode])
 
 
 # ---- encoding (the firmware's side, for tests, fake devices and file conversion) ----------------

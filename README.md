@@ -19,6 +19,7 @@ pages) can be watched, for example a second SID at `$D500`, the VIC, or a cartri
 | Player (`trsid.py`) | renders to WAV; the live path (TCP, real time, `tools/fake_tr.py` as the TeensyROM) matches the offline render (62 dB, no underruns, `make test-live`); not tried on a sound card (the container has none) |
 | End to end with real tunes | three of the TeensyROM's bundled SIDs, played in a 6502 emulator, through the core, the wire and reSIDfp: every write at its exact cycle, audio equal to a direct render |
 | Teensyduino build (GCC 11.3, link, size) | **builds** in CI (`TeensyROM+_0.9_full.hex`; main image RAM1 free for locals 75004, padding 26888). `isrPHI2` saves `{r3-r9, sl, fp, lr}` (already every callee-saved register, so the hook cannot add saves); write cycles branch out to the page-map test; `SnoopTap` stores the entry before `head` |
+| USB audio dongle on the host port (0.9-sn8, phase 2 step 3) | host-tested (`make test`: the owner's dongle's descriptors, siTD words, the frame plan, the 1 kHz tone, command `64 53 03`); compiles for the M7 alone and with teensyrom-vdrive in either order, `isrPHI2` and `SnoopTap` the same code as sn7. **Not yet on hardware**: docs/USB-AUDIO.md, "Trying it on hardware" |
 | Hardware (owner, 2026-11-03, 0.9-sn1) | **works** over TCP and USB serial. TCP over a multi-hop WiFi link gave many late writes at the old 30 ms latency (now 250 ms by default on TCP). USB serial gave ~0 late writes but glitched or crashed cartridge games (Ms. Pac-Man): every USB transfer runs with interrupts off. 0.9-sn2 batches USB sends (20 ms): **Ms. Pac-Man still misbehaves on USB** (owner). 0.9-sn3 on hardware (owner, 2026-11-03): **TCP much better** (late writes in a 30-45 s clip down from thousands, 8000 on one run, to 538, no audible drops). Ms. Pac-Man on USB still crashes; `--isr` over 16 s showed no missed cycles (`>1us` 0), 12 interrupts >250 ns late (8 of them in the second it crashed) and ~265/s small (<250 ns) lateness, ~1500/s during the launch. Next: the same over TCP, the USB cable with no capture, and a capture of an unwritten address |
 
 ## How it works
@@ -70,6 +71,20 @@ host/trsid.py --replay x.snoop --wav x.wav                      # a recording to
 ```
 
 `trsnoop.py` prints one line per block (C64 cycles, seconds, address, bytes) plus HELLO/STATUS/BYE lines.
+
+**A USB audio dongle on the TeensyROM's host port** (0.9-sn8, phase 2; not yet tried on hardware). A USB Audio Class 1
+"USB sound card" stick that takes 16-bit stereo at 48 kHz (synchronous or adaptive, full speed) streams as soon as it is
+plugged in, silence until told otherwise. For now it plays a test tone; phase 2 step 4 will play the SID emulated on the
+TeensyROM:
+
+```
+host/trsnoop.py --tcp 192.168.1.50 --tone on       # 1 kHz, -12 dBFS, from the dongle's 3.5 mm output
+host/trsnoop.py --tcp 192.168.1.50 --tone status   # what the dongle does: streaming, frames, errors, missed
+host/trsnoop.py --tcp 192.168.1.50 --tone off
+```
+
+While `trsid.py` or `trsnoop.py` holds the data port (6581), add `--tcp-port 2112`. docs/USB-AUDIO.md has the design and
+the checks to run on hardware.
 
 **`--gap`** (trsnoop; default 0): writes to consecutive addresses within N cycles of each other share
 one block and its time. Measured on real tunes (`tests/test_e2e.py`, numbers from three tunes):
@@ -142,14 +157,17 @@ and `host/trsid.py --tcp 127.0.0.1`.
 git clone https://github.com/SensoriumEmbedded/TeensyROM && cd TeensyROM
 git checkout $(cat ../teensyrom-snoop/firmware/UPSTREAM)
 git apply ../teensyrom-snoop/firmware/teensyrom-snoop.patch
-python3 ../teensyrom-snoop/tools/stamp_version.py .   # TRVersion 0.9 -> 0.9-sn4
+python3 ../teensyrom-snoop/tools/stamp_version.py .   # TRVersion 0.9 -> 0.9-sn8
 node tools/build-firmware.mjs --target tr-plus      # arduino-cli, teensy:avr@1.61.0, CRC32@2.0.1
 ```
 
-The stamp makes the build obvious: the TR menu's top line reads `TeensyROM+ v0.9-sn4`, and the hex is
-`TeensyROM+_0.9-sn4_full.hex`. The number is `firmware/SNREV`. The stamp is a separate step because
+The stamp makes the build obvious: the TR menu's top line reads `TeensyROM+ v0.9-sn8`, and the hex is
+`TeensyROM+_0.9-sn8_full.hex`. The number is `firmware/SNREV`. The stamp is a separate step because
 teensyrom-vdrive's patch rewrites the same `TRVersion` line. To add teensyrom-vdrive as well, apply its patch
-too (either order), then stamp: `0.9.0.45` becomes `0.9.0.45-sn4`.
+too (either order), then stamp: `0.9.0.45` becomes `0.9.0.45-sn8`.
+
+From sn8 the patch also adds a USB audio output driver to the bundled `src/USBHost_t36/` (isochronous OUT in `ehci.cpp`,
+`USBAudioOut`, `isoaudio`); its sources are `firmware/usbhost/` here (docs/USB-AUDIO.md).
 
 The TeensyROM's host tools read the version with `v[\d.]+` (`tools/lib/trserial.mjs`), so they show the
 part before `-sn1` (`v0.9`). The menu, the serial banner and the file name show all of it.
@@ -160,7 +178,7 @@ part before `-sn1` (`v0.9`). The menu, the serial banner and the file name show 
 **With the SID emulator (phase 2, GPL).** After applying the patch and before stamping, run
 `python3 ../teensyrom-snoop/tools/fetch_resid.py --tree .`. It downloads reSID 0.16 (Dag Lem, GPL-2.0-or-later)
 at a pinned commit into `Source/Teensy/src/reSID/` and moves its wave tables to flash. The glue sees it there and
-builds the emulator in; the stamp then reads `0.9-sn7r`. That image is GPL-2.0-or-later as a whole: whoever
+builds the emulator in; the stamp then reads `0.9-sn8r`. That image is GPL-2.0-or-later as a whole: whoever
 distributes it must offer its source. reSID is never committed to this repository, and the plain build has none
 of it.
 
@@ -174,6 +192,9 @@ of it.
   replacing a running capture, TCP disconnect, DTR drop, refusals and NTSC.
 * `make test-sid` (in `make test` once `make resid` has fetched reSID into `build/resid`): the glue with the SID
   emulator, its samples compared with reSID driven directly with the same writes and split points.
+* `tests/test_usbaudio.py` (`make test-audio`): the USB audio driver's portable half. The owner's dongle's descriptors and
+  variants, the siTD words, the frame plan against a model of the host controller, the test tone, `trsnoop.py --tone`.
+  `tests/fw_host` also runs command `64 53 03` through the glue (packets of exactly 192 bytes, one continuous tone).
 * `tests/test_sidplay.py`: the renderer (pitch, sub-sample timing, stereo, 8580/NTSC) and the live
   player under late, jittery frames and 0.5 % sound-card drift.
 * `tests/test_e2e.py`: real tunes end to end (needs `pip install py65 pyresidfp numpy` and a TeensyROM checkout, `TEENSYROM=`).
@@ -182,7 +203,8 @@ of it.
 `make test-live` plays one in real time through `fake_tr.py` and `trsid.py --tcp` and compares the result.
 
 `tools/armcheck/build.sh` compiles the main sketch for the Cortex-M7 from GitHub sources and prints
-the registers `isrPHI2` saves (see the script for the repositories it needs).
+the registers `isrPHI2` saves (see the script for the repositories it needs). It also compiles the library sources under
+`src/` that the patches add or change (from sn8: `ehci.cpp`, `USBAudioOut.cpp`, `isoaudio.c`).
 
 ## Decisions and assumptions (made while the owner was away; easy to revisit)
 
@@ -211,6 +233,11 @@ the registers `isrPHI2` saves (see the script for the repositories it needs).
 11. **reSID on the Teensy is fetched at build time, never committed** (owner, 2026-11-07): `tools/fetch_resid.py`.
     reSID 0.16, not 1.0: 1.0 builds large tables in RAM at run time; 0.16's wave tables are constants that can sit
     in flash. Only an image built with it (`-snNr`) is GPL.
+12. **The USB audio dongle (sn8)** streams from the moment it is plugged in until it is unplugged, silence unless the
+    tone is on, with 8 ms queued (`ISO_DEPTH`). The tone setting lives until switched off or the TeensyROM restarts.
+    Command `64 53 03` reports in a text line, not a frame, so it works with no capture running. One dongle at a time,
+    full speed, straight on the host port or behind a high-speed hub; asynchronous sinks (feedback endpoints) are
+    not supported.
 
 ## Next
 
@@ -229,3 +256,6 @@ the registers `isrPHI2` saves (see the script for the repositories it needs).
   On the host its output equals reSID driven directly with the same writes, sample for sample (`make resid test`).
   **On hardware (owner, 2026-11-08, Ms. Pac-Man running, TCP, 39 s): reSID takes 26.0% of the time** (interrupts
   included), no phi2 interrupt >250 ns late, and the live player had no underruns (latency 107 ms, 38 late writes).
+  Step 3, the USB audio dongle on the host port with a 1 kHz test tone, is in 0.9-sn8 (host-tested, not yet on
+  hardware): `trsnoop.py --tone on|off|status`. **Next: the checks in docs/USB-AUDIO.md, "Trying it on hardware"**
+  (the tone, Ms. Pac-Man's late counts with it playing, unplug and replug). Then step 4, reSID into the dongle.

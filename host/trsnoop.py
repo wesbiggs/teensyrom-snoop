@@ -4,6 +4,7 @@
   trsnoop.py --port /dev/ttyACM0 --range D400-D41C
   trsnoop.py --tcp 192.168.1.50 --range D400-D41C --range D500-D51C --raw sid.snoop
   trsnoop.py --replay sid.snoop
+  trsnoop.py --tcp 192.168.1.50 --tone on       # the 1 kHz test tone on the USB audio dongle (0.9-sn8+)
 
 Ranges are hex, inclusive: D418, D400-D41C, D400+29.  Ctrl-C sends the stop command.
 --raw writes the channel bytes as received (replay them with --replay).
@@ -75,6 +76,24 @@ class SerialChan:
         self.s.close()
 
 
+def read_line(ch, rest: bytes, seconds: float = 2.0) -> str:
+    """the text line after an Ack (what the audio command reports)"""
+    buf = rest
+    end = time.time() + seconds
+    while b"\n" not in buf and time.time() < end:
+        buf += ch.read()
+    return buf.split(b"\n", 1)[0].decode("ascii", "replace").strip()
+
+
+def audio(ch, mode: str) -> bool:
+    """--tone on|off|status: the USB audio dongle on the TeensyROM's host port"""
+    ch.write(sp.audio_command({"off": sp.AUDIO_SILENCE, "on": sp.AUDIO_TONE, "status": sp.AUDIO_REPORT}[mode]))
+    ok, rest = wait_ack(ch)
+    if ok:
+        print(read_line(ch, rest) or "(no report: firmware before 0.9-sn8?)")
+    return ok
+
+
 def wait_ack(ch, seconds: float = 3.0) -> tuple[bool, bytes]:
     """Read until AckToken or FailToken; returns (ok, bytes after the token)."""
     buf = b""
@@ -144,6 +163,9 @@ def main():
     ap.add_argument("--seconds", type=float, default=0, help="stop after this long (0 = until Ctrl-C)")
     ap.add_argument("--quiet", action="store_true", help="only HELLO/STATUS/BYE lines")
     ap.add_argument("--stop", action="store_true", help="just send the stop command")
+    ap.add_argument("--tone", choices=("on", "off", "status"),
+                    help="the 1 kHz test tone on a USB audio dongle in the TeensyROM's host port (firmware 0.9-sn8+), "
+                    "then print what the dongle does; alone, or before a capture with --range")
     a = ap.parse_args()
 
     if a.replay:
@@ -157,6 +179,11 @@ def main():
         ch.close()
         sys.exit(0 if ok else 1)
 
+    if a.tone:
+        ok = audio(ch, a.tone)
+        if not ok or not a.range:
+            ch.close()
+            sys.exit(0 if ok else 1)
     if not a.range:
         ap.error("at least one --range")
     ranges = [sp.parse_range(r) for r in a.range]

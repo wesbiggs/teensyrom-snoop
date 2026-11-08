@@ -13,6 +13,13 @@ small edits that each assert on upstream's text:
                    late-interrupt count at the end of the "late" branch (teensyrom-vdrive edits its top)
   SerUSBIO.ino     token 0x6453 in ProcessCommand's always-available switch
 
+and, for the USB audio dongle on the host port (phase 2 step 3), copies firmware/usbhost/ to
+Source/Teensy/src/USBHost_t36/ (USBAudioOut, isochronous.h, isoaudio.{h,c}) and edits the vendored library:
+
+  ehci.cpp         include isochronous.h; the siTD refill in isr(); add_qh_to_periodic_schedule steps past
+                   siTDs (its TODO); the isochronous OUT engine (firmware/usbhost/ehci_iso.inc) at the end
+  README.md        the local modifications listed
+
 The hunks are kept away from the lines teensyrom-vdrive's patch changes, so both apply in either order.
 """
 import argparse
@@ -40,6 +47,58 @@ def edit(tree, rel, old, new, count=1):
         fh.write(s.replace(old, new))
 
 
+UH = f"{T}/src/USBHost_t36"
+USBHOST_FILES = ("USBAudioOut.h", "USBAudioOut.cpp", "isochronous.h", "isoaudio.h", "isoaudio.c")
+
+
+def usbhost_edits(tree):
+    """Isochronous OUT in the vendored USBHost_t36 (pinned at f943c4b; teensyrom-vdrive does not touch it)."""
+    ehci = f"{UH}/ehci.cpp"
+    edit(tree, ehci,
+         '#include "USBHost_t36.h" // Read this header first for key info\n',
+         '#include "USBHost_t36.h" // Read this header first for key info\n'
+         '#include "isochronous.h" // teensyrom-snoop: isochronous OUT through siTDs, at the end of this file\n')
+    edit(tree, ehci,
+         "\tif (stat & USBHS_USBSTS_UAI) { // completed qTD(s) from the async schedule\n",
+         "\tif (stat & (USBHS_USBSTS_UPI | USB_USBSTS_UI)) {\n"
+         "\t\tusbhost_iso_out_service(); // teensyrom-snoop: refill the siTDs first, the deadline is a frame away\n"
+         "\t}\n"
+         "\tif (stat & USBHS_USBSTS_UAI) { // completed qTD(s) from the async schedule\n")
+    edit(tree, ehci,
+         "\t\tuint32_t num = periodictable[i];\n"
+         "\t\tPipe_t *node = (Pipe_t *)(num & 0xFFFFFFE0);\n"
+         "\t\tif ((num & 1) || ((num & 6) == 2 && node->periodic_interval < interval)) {\n"
+         "\t\t\t//println(\"  add to slot \", i);\n"
+         "\t\t\tpipe->qh.horizontal_link = num;\n"
+         "\t\t\tperiodictable[i] = (uint32_t)&(pipe->qh) | 2; // 2=QH\n"
+         "\t\t} else {\n"
+         "\t\t\t//println(\"  traverse list \", i);\n"
+         "\t\t\t// TODO: skip past iTD, siTD when/if we support isochronous\n",
+         "\t\t// teensyrom-snoop: iTDs and siTDs come first in a slot; the QH tree starts after them.\n"
+         "\t\t// Every descriptor type keeps its next link in word 0.\n"
+         "\t\tvolatile uint32_t *head = &periodictable[i];\n"
+         "\t\twhile (!(*head & 1) && (*head & 6) != 2) head = (volatile uint32_t *)(*head & 0xFFFFFFE0);\n"
+         "\t\tuint32_t num = *head;\n"
+         "\t\tPipe_t *node = (Pipe_t *)(num & 0xFFFFFFE0);\n"
+         "\t\tif ((num & 1) || ((num & 6) == 2 && node->periodic_interval < interval)) {\n"
+         "\t\t\t//println(\"  add to slot \", i);\n"
+         "\t\t\tpipe->qh.horizontal_link = num;\n"
+         "\t\t\t*head = (uint32_t)&(pipe->qh) | 2; // 2=QH\n"
+         "\t\t} else {\n"
+         "\t\t\t//println(\"  traverse list \", i);\n")
+    with open(os.path.join(ROOT, "firmware", "usbhost", "ehci_iso.inc")) as fh:
+        engine = fh.read()
+    edit(tree, ehci,
+         '\tfree_Pipe(pipe);\n\tprintln("* Delete Pipe completed");\n}\n',
+         '\tfree_Pipe(pipe);\n\tprintln("* Delete Pipe completed");\n}\n' + engine)
+    edit(tree, f"{UH}/README.md",
+         "\n## License\n",
+         "- teensyrom-snoop's patch (its phase 2, a USB audio dongle on the host port) adds `USBAudioOut.{h,cpp}`, "
+         "`isochronous.h` and `isoaudio.{h,c}`, and in `ehci.cpp` the isochronous OUT engine (siTDs, at the end), its "
+         "refill in `isr()`, and `add_qh_to_periodic_schedule` stepping past siTDs to the QH tree.\n"
+         "\n## License\n")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("teensyrom")
@@ -62,6 +121,8 @@ def main():
             shutil.copy(os.path.join(ROOT, "core", f), os.path.join(tree, T, "snoop", f))
         for f in ("WriteSnoop.h", "WriteSnoop.ino"):
             shutil.copy(os.path.join(ROOT, "firmware", f), os.path.join(tree, T, f))
+        for f in USBHOST_FILES:
+            shutil.copy(os.path.join(ROOT, "firmware", "usbhost", f), os.path.join(tree, UH, f))
 
         edit(tree, f"{T}/TeensyROM.h",
              "   #define FeatTCPListen //Enable TCP Listen capability for remote commands\n",
@@ -116,6 +177,8 @@ def main():
              "         return;\n"
              "   #endif\n"
              "      case ResetC64Token:   //Reset C64\n")
+
+        usbhost_edits(tree)
 
         subprocess.run(git + ["add", "-A"], check=True)
         diff = subprocess.run(git + ["diff", "--cached", "--no-color"], check=True, capture_output=True).stdout

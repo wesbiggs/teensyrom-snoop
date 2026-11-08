@@ -120,6 +120,51 @@ bool GetUInt(uint32_t *InVal, uint8_t NumBytes)
    return true;
 }
 
+// The USB audio driver (src/USBHost_t36/USBAudioOut.h on the Teensy) as far as the glue uses it: a device can be
+// "plugged in", and Frame() asks the glue's fill function for one 1 ms packet as the USBHS interrupt would.
+#define SNOOP_AUDIO_STUB
+#include "../../firmware/usbhost/isoaudio.c"
+typedef void (*usbhost_iso_fill_t)(void *ctx, uint8_t *packet, uint32_t len);
+typedef struct { uint32_t frames, errors, missed, status, shift; uint8_t running; } usbhost_iso_stats_t;
+class USBHost {};
+USBHost myusbHost;
+class USBAudioOut {
+public:
+   enum { RATE = 48000, FRAME_BYTES = RATE / 1000 * 4 };
+   struct Info {
+      bool attached, streaming;
+      uint16_t vid, pid;
+      uint8_t iface, alt, ep, sync, fu;
+      int8_t step;
+      uint8_t failed_step;
+      int16_t volume, vol_min, vol_max;
+      bool unmuted;
+      int last_reject;
+      usbhost_iso_stats_t iso;
+   };
+   Info state;
+   usbhost_iso_fill_t fill;
+   void *ctx;
+   USBAudioOut(USBHost &, usbhost_iso_fill_t f, void *c = NULL) : fill(f), ctx(c) { memset(&state, 0, sizeof state); }
+   void info(Info *i) { *i = state; }
+   void plug()   // the owner's dongle, set up as USBAudioOut does it (tests/test_usbaudio.py has its descriptors)
+   {
+      state.attached = state.streaming = true;
+      state.vid = 0x0020; state.pid = 0x0B21; state.iface = 2; state.alt = 1; state.ep = 0x03; state.sync = 3;
+      state.fu = 2; state.step = 7; state.vol_min = -45 * 256; state.vol_max = 0; state.unmuted = true;
+   }
+   void unplug() { state.attached = state.streaming = false; }
+   std::vector<uint8_t> Frame()
+   {
+      std::vector<uint8_t> p(FRAME_BYTES + 4, 0xEE);   // and a guard: exactly FRAME_BYTES are written
+      fill(ctx, p.data(), FRAME_BYTES);
+      if (p[FRAME_BYTES] != 0xEE) { fprintf(stderr, "fill wrote past the packet\n"); exit(1); }
+      p.resize(FRAME_BYTES);
+      if (state.streaming) state.iso.frames++;
+      return p;
+   }
+};
+
 // the source tree layout of the patched TeensyROM: snoop/ next to the .ino files
 #include "../../firmware/WriteSnoop.h"
 #include "../../firmware/WriteSnoop.ino"
@@ -319,6 +364,80 @@ int main()
       CHECK(SnoopState.running && SnoopOut == (Stream *)&SnoopClient);
       Command(&SnoopClient, {0x64, 0x53, 0});
       CHECK(!SnoopState.running);
+   }
+
+   // 10. the USB audio dongle: 64 53 03 mode switches the source between silence and the 1 kHz tone, and reports
+   {
+      auto Text = [](const Stream &s) { return std::string(s.out.begin(), s.out.end()); };
+      auto Samples = [](const std::vector<uint8_t> &p, int ch) {
+         std::vector<int16_t> v;
+         for (size_t i = 0; i + 3 < p.size(); i += 4) v.push_back((int16_t)(p[i + 2 * ch] | p[i + 2 * ch + 1] << 8));
+         return v;
+      };
+      Stream Au;
+      Command(&Au, {0x64, 0x53, 3, 2});                   // report: nothing plugged in
+      CHECK(Au.out.size() > 2 && Au.out[0] == 0xCC && Au.out[1] == 0x64);
+      CHECK(Text(Au).find("Snoop audio: silence; no USB audio device\n") != std::string::npos);
+      std::vector<uint8_t> p = SnoopDongle.Frame();
+      CHECK(p == std::vector<uint8_t>(192, 0));          // silence, all the same
+
+      SnoopDongle.plug();
+      Au.out.clear();
+      Command(&Au, {0x64, 0x53, 3, 1});                   // tone on
+      std::string t = Text(Au);
+      CHECK(Au.out[0] == 0xCC && Au.out[1] == 0x64);
+      CHECK(t.find("Snoop audio: tone 1000 Hz; 0020:0B21 interface 2 alt 1 ep 03, streaming; frames 0, errors 0, "
+                   "missed 0; volume 0/256 dB (-11520..0), unmuted\n") != std::string::npos);
+      // one second of frames: 192 bytes each, left = right, 1000 Hz at -12 dBFS, the same as one continuous tone
+      isoaudio_tone_t Ref;
+      isoaudio_tone_init(&Ref, 1000, 48000, 8192);
+      std::vector<uint8_t> All, Want(192 * 1000);
+      for (int f = 0; f < 1000; f++)
+      {
+         p = SnoopDongle.Frame();
+         CHECK(p.size() == 192);
+         All.insert(All.end(), p.begin(), p.end());
+         if (f == 499)
+         {  // a second "on" mid-way leaves the phase alone
+            Command(&Au, {0x64, 0x53, 3, 1});
+         }
+      }
+      isoaudio_tone_packet(&Ref, Want.data(), 48 * 1000);
+      CHECK(All == Want);
+      std::vector<int16_t> L = Samples(All, 0), R = Samples(All, 1);
+      CHECK(L == R);
+      int Ups = 0, Peak = 0;
+      for (size_t i = 1; i < L.size(); i++) if (L[i - 1] < 0 && L[i] >= 0) Ups++;
+      for (int16_t v : L) Peak = std::max(Peak, (int)std::abs(v));
+      CHECK(Ups >= 999 && Ups <= 1000);
+      CHECK(Peak >= 8190 && Peak <= 8192);
+      FILE *f = fopen("build/fw_tone.raw", "wb");   // for tests/test_fw.py: the spectrum
+      if (f) { fwrite(All.data(), 1, All.size(), f); fclose(f); }
+      printf("fw_host: tone: %zu frames of 192 bytes, %d periods, peak %d\n", All.size() / 192, Ups, Peak);
+
+      // the tone runs on during a capture, and the command works on the capture's own channel
+      Command(&Serial, {0x64, 0x53, 1, 1, 0x18, 0xD4, 0x18, 0xD4, 0, 0});
+      Loop();
+      Command(&Serial, {0x64, 0x53, 3, 2});
+      CHECK(SnoopState.running && SnoopOut == (Stream *)&Serial);
+      CHECK(Samples(SnoopDongle.Frame(), 0) != std::vector<int16_t>(48, 0));
+      Command(&Serial, {0x64, 0x53, 0});
+
+      Au.out.clear();
+      Command(&Au, {0x64, 0x53, 3, 0});                   // tone off: silence
+      CHECK(Text(Au).find("Snoop audio: silence; 0020:0B21") != std::string::npos);
+      CHECK(SnoopDongle.Frame() == std::vector<uint8_t>(192, 0));
+      Au.out.clear();
+      Command(&Au, {0x64, 0x53, 3, 7});                   // bad mode: refused, nothing changes
+      CHECK(Au.out[0] == 0x7F && Au.out[1] == 0x9B && Text(Au).find("mode 0 silence, 1 tone, 2 report") != std::string::npos);
+      Au.out.clear();
+      Command(&Au, {0x64, 0x53, 3});                      // cut short
+      CHECK(Text(Au).find("Timeout!") != std::string::npos);
+      SnoopDongle.unplug();
+      SnoopDongle.state.last_reject = ISOAUDIO_ASYNC;      // an asynchronous one was offered meanwhile
+      Au.out.clear();
+      Command(&Au, {0x64, 0x53, 3, 2});
+      CHECK(Text(Au).find("no USB audio device (one was offered: asynchronous, not supported)") != std::string::npos);
    }
 
 #ifdef SNOOP_RESID_H
