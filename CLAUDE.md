@@ -60,7 +60,9 @@ owner's run dropped on nearly every callback for 50 s). Rerun (owner): latency s
 8 underruns in 58 s. Not a clock: `trsid.py` now prints both at the end, and they were fine (TeensyROM +117 ppm,
 sound card 47946/s; HELLO says cpu 816 MHz, phi2 NTSC). The cause: HELLO's emulator reset (1.2 s warm-up, ~0.36 s
 on the Mac) ran before C64 time 0 was marked, and that backlog was rendered into the 30 ms FIFO at once: ~360 ms of
-unreported delay, dropped over the next ~25 s. Fixed (HELLO's arrival marked first; before playing, render only the
-FIFO's worth). Not yet heard on hardware.
+unreported delay, dropped over the next ~25 s. That fix was not enough on hardware (15562 drops in 33 s): trsid.py
+also built the renderer (the same warm-up) after the start command, so HELLO waited in `rest`. Now trsid.py builds
+the player and starts the sound card before the start command, and a forward jump of "now" by more than 4 FIFOs while
+playing is skipped, not queued. `--isr` lines show the FIFO and the drops/repeats of each second. Not yet on hardware.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
 file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.

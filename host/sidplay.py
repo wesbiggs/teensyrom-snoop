@@ -185,6 +185,7 @@ class LivePlayer:
     AUTO_MARGIN = 0.010    # above the measured 99th-percentile frame delay
     AUTO_WINDOW = 6.0      # seconds of frame delays kept
     AUTO_UP, AUTO_DOWN = 0.05, 0.010   # how fast the latency may move, seconds per second
+    JUMP_FIFOS = 4         # a jump of "now" by more than this many FIFO targets while playing is skipped, not queued
     MAX_STEP = 4           # samples dropped or repeated per sound card callback at most (4 per 256: 15.6 ms/s at 48 kHz)
 
     def __init__(self, renderer: SidRenderer, latency=None, buffer=0.03, now=time.monotonic, trim_start=True):
@@ -269,6 +270,11 @@ class LivePlayer:
                 # before playing, render no more than the FIFO holds: what is older (the time HELLO's
                 # emulator reset took, ~0.36 s on a Mac) would only sit in the FIFO as extra delay
                 self.r.skip_to(target - keep)
+            elif self.trim_start and self.started and target - self.r.cursor > self.JUMP_FIFOS * keep:
+                # "now" jumped ahead while playing (a stall, or HELLO marked late): skip to just the FIFO's
+                # target instead of queueing the jump, which the drift correction would take many seconds to drop
+                held = int(self.fifo_len / self.r.rate * self.r.phi2)
+                self.r.skip_to(target - max(0, keep - held))
             elif behind > 1.0:                # a stall: jump, keep the state right
                 self.r.skip_to(target - int(0.2 * self.r.phi2))
             s = self.r.render_to(target)

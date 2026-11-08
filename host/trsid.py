@@ -81,13 +81,9 @@ def main():
             sd.play(samples, a.rate, blocking=True)
         return
 
-    from trsnoop import SerialChan, TcpChan, wait_ack
-    ch = TcpChan(a.tcp, a.tcp_port) if a.tcp else SerialChan(a.port)
-    ch.write(sp.start_command([(b, b + 0x1C) for b in bases], 0, a.send_ms))
-    ok, rest = wait_ack(ch)
-    if not ok:
-        sys.exit(1)
-
+    # The player and the sound card first: building the renderer runs a 1.2 s emulator warm-up (~0.36 s of real
+    # time on a Mac).  Done after the start command, HELLO (which comes with the ack) waited that long before it was
+    # fed, C64 time 0 was marked that late, and the first STATUS later put ~0.36 s of audio into the 30 ms FIFO.
     player = sidplay.LivePlayer(sidplay.SidRenderer(**kw), latency=a.latency, buffer=a.buffer, trim_start=not a.no_play)
     recorded = []
     took = [0, None, None]      # samples the sound card took, first and last callback (monotonic)
@@ -127,9 +123,20 @@ def main():
     th.start()
     if stream:
         stream.start()
+
+    from trsnoop import SerialChan, TcpChan, wait_ack
+    ch = TcpChan(a.tcp, a.tcp_port) if a.tcp else SerialChan(a.port)   # the data port wants the command at once
+    ch.write(sp.start_command([(b, b + 0x1C) for b in bases], 0, a.send_ms))
+    ok, rest = wait_ack(ch)
+    if not ok:
+        stop.set()
+        if stream:
+            stream.stop()
+        sys.exit(1)
     end = time.time() + a.seconds if a.seconds else None
     last_status = None
     cpu_hz, probe_cyc, probe_free = 600_000_000, 0, 0
+    shown = [0, 0]              # drops and repeats at the last --isr line
     marks = []                  # (arrival, C64 time) of each STATUS: the TeensyROM's clock against this computer's
     try:
         data = rest
@@ -144,9 +151,12 @@ def main():
                     probe_free += f.probe_free
                     if a.isr and last_status is not None:
                         secs = max((f.time - last_status.time) / player.r.phi2, 1e-3)
-                        print(f"# latency {player.latency * 1000:4.0f} ms  late bus interrupts/s: {(f.late - last_status.late) / secs:7.1f}  "
+                        print(f"# latency {player.latency * 1000:4.0f} ms  FIFO {player.fifo_len * 1000 / a.rate:4.0f} ms  "
+                              f"dropped {player.dropped - shown[0]:4d} repeated {player.repeated - shown[1]:4d}  "
+                              f"late bus interrupts/s: {(f.late - last_status.late) / secs:7.1f}  "
                               f">250ns: {(f.late250 - last_status.late250) / secs:6.1f}  "
                               f">1us: {(f.late1000 - last_status.late1000) / secs:6.1f}  {f.probe_text(cpu_hz)}", flush=True)
+                        shown[:] = [player.dropped, player.repeated]
                     last_status = f
                 if isinstance(f, sp.Bye):
                     raise KeyboardInterrupt

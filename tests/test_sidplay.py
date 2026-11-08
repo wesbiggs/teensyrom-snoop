@@ -197,6 +197,30 @@ class Live(unittest.TestCase):
         self.assertEqual(p.underruns, 0)
 
 
+    def test_hello_fed_late_is_skipped_not_queued(self):
+        """HELLO handed to the player 0.36 s after it arrived (trsid built the renderer in between, a 1.2 s warm-up):
+        C64 time 0 is marked late, and the first STATUS moves "now" 0.36 s ahead while playing.  That jump is
+        skipped; queued, it was dropped over ~25 s (15562 samples on hardware, menu idle)."""
+        ft = FakeTime()
+        p = sidplay.LivePlayer(sidplay.SidRenderer(bases=[0xD400], sample_rate=RATE), now=ft)
+        start = ft.t
+        ft.t += 0.36
+        p.feed(sp.Hello(sp.PROTO_VERSION, sp.PHI2_NTSC, 816_000_000, 0, [(0xD400, 0xD41C)]))
+        pending = [(start + k + 0.002, sp.Status(1, int(k * sp.PHI2_NTSC), 0, 0, 0, 0)) for k in range(1, 12)]
+        t_next_cb = ft.t
+        while ft.t < start + 12:
+            ft.t += 0.001
+            while pending and pending[0][0] <= ft.t:
+                p.feed(pending.pop(0)[1])
+            p.pump()
+            while t_next_cb <= ft.t:
+                p.fill(256)
+                t_next_cb += 256 / RATE
+        self.assertLess(p.dropped + p.repeated, 3000)     # the FIFO's own 30 ms on top, dropped: ~1500
+        self.assertEqual(p.underruns, 0)
+        self.assertLess(p.fifo_len, 1.3 * p.target)
+
+
 @unittest.skipUnless(HAVE, "pyresidfp and numpy not installed")
 class AutoLatency(unittest.TestCase):
     def run_link(self, jitter, seconds=12.0, spikes=0.0):
