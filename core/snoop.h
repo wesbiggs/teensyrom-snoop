@@ -22,7 +22,7 @@
 extern "C" {
 #endif
 
-#define SNOOP_PROTO_VERSION 3
+#define SNOOP_PROTO_VERSION 4
 
 #ifndef SNOOP_MAX_RANGES
 #define SNOOP_MAX_RANGES   16     /* address ranges per start command */
@@ -38,6 +38,10 @@ extern "C" {
 #endif
 #ifndef SNOOP_OUT_SIZE
 #define SNOOP_OUT_SIZE     8192   /* output FIFO (framed bytes waiting for the channel), power of two */
+#endif
+
+#ifndef SNOOP_PROBE_STALL
+#define SNOOP_PROBE_STALL  40     /* CPU cycles: a gap between two counter reads longer than this is an interrupt */
 #endif
 
 #if (SNOOP_RING & (SNOOP_RING - 1)) != 0 || (SNOOP_OUT_SIZE & (SNOOP_OUT_SIZE - 1)) != 0
@@ -166,6 +170,12 @@ typedef struct {
    uint32_t       last_status_us;
    uint32_t       writes;
 
+   /* CPU probe (snoop_cpu_probe), since the last STATUS */
+   uint32_t       probe_cyc;      /* CPU cycles spent probing */
+   uint32_t       probe_free;     /* ...of which the main loop had (no interrupt running) */
+   uint16_t       probe_worst;    /* lowest free share of a single probe, per mille (1000 = no probe yet) */
+   uint32_t       probe_stall;    /* longest single interruption, CPU cycles */
+
    /* output FIFO */
    uint8_t        out[SNOOP_OUT_SIZE];
    uint32_t       out_head, out_tail;
@@ -194,6 +204,13 @@ void snoop_stop(snoop_t *s, uint8_t reason, uint32_t now_us, uint32_t now_stamp)
  * The glue must call it at least every 2^31 stamp ticks (3.5 s at 600 MHz).
  * Returns the number of events taken. */
 uint32_t snoop_poll(snoop_t *s, uint32_t now_us, uint32_t now_stamp);
+
+/* CPU probe, for phase 2 (an emulator in the main loop): how much of the CPU the interrupts leave.
+ * Spins for window_cyc CPU cycles reading the cycle counter through cyc(); every gap between two reads
+ * longer than SNOOP_PROBE_STALL is time an interrupt took (isrPHI2 above all).  Interrupts shorter than
+ * that count as free, so the result is an upper bound.  Adds to the next STATUS; returns the free cycles.
+ * Blocks the caller for the window: the glue runs it briefly and seldom (1 ms every 100 ms). */
+uint32_t snoop_cpu_probe(snoop_t *s, uint32_t (*cyc)(void), uint32_t window_cyc);
 
 /* Queue a STATUS frame now (closes the open WRITES frame first). */
 void snoop_status(snoop_t *s);

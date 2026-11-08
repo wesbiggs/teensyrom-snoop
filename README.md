@@ -204,3 +204,6 @@ the registers `isrPHI2` saves (see the script for the repositories it needs).
 
 * On hardware: `trsnoop.py --range D400-D41C` while the TeensyROM's SID player runs a tune, then `trsid.py`.
 * Phase 2, the SID emulated on the Teensy, out through a USB audio dongle on the host port: `docs/USB-AUDIO.md`.
+  Step 1, the CPU left over, is in 0.9-sn6 (not yet on hardware): `trsid.py --isr` prints each second the share of
+  the CPU the interrupts leave to the main loop (`CPU free`), the worst 1 ms and the longest interrupt, and the
+  average at the end. Run it with the menu showing and with a busy game (STATUS v4, docs/PROTOCOL.md).

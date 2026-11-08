@@ -27,6 +27,17 @@ uint32_t SnoopSendEveryMs = 0;
 uint32_t SnoopLastSendMs = 0;
 DMAMEM uint8_t SnoopTxBuf[2048];   // one USB serial transmit buffer (TX_SIZE) per write
 
+// CPU probe (0.9-sn6), for phase 2 (docs/USB-AUDIO.md): while a capture runs, every SnoopProbeEveryMs the loop
+// spins for SnoopProbeUs on the cycle counter, and snoop_cpu_probe counts the gaps the interrupts took.  The share
+// left goes out in STATUS (protocol 4).  It holds up loop() for that 1 ms, 1% of the time.
+#define SnoopProbeEveryMs  100
+#define SnoopProbeUs       1000
+#ifndef SnoopCycles
+#define SnoopCycles() ARM_DWT_CYCCNT
+#endif
+uint32_t SnoopLastProbeMs = 0;
+FLASHMEM uint32_t SnoopReadCycles() { return SnoopCycles(); }
+
 #ifdef FeatTCPListen
 // The data port (0.9-sn4).  A client connects to SnoopDataPort and sends the same commands there; the stream
 // goes back on that connection, so the TeensyROM's own port (2112) stays free for other tools (trls, trvdrive,
@@ -155,6 +166,7 @@ FLASHMEM void SnoopCommand()
    SnoopNagle = !Flags && (SnoopOut == (Stream *)&tcpClient || SnoopOut == (Stream *)&SnoopClient);
 #endif
    SnoopLastSendMs = millis();
+   SnoopLastProbeMs = SnoopLastSendMs - SnoopProbeEveryMs;   // the first probe on the next pass
 }
 
 #ifdef FeatTCPListen
@@ -220,6 +232,11 @@ FLASHMEM void SnoopService()
    }
    snoop_poll(&SnoopState, micros(), ARM_DWT_CYCCNT);
    const uint32_t Now = millis();
+   if (Now - SnoopLastProbeMs >= SnoopProbeEveryMs)
+   {
+      SnoopLastProbeMs = Now;
+      snoop_cpu_probe(&SnoopState, SnoopReadCycles, (uint32_t)((uint64_t)F_CPU_ACTUAL * SnoopProbeUs / 1000000u));
+   }
    const uint32_t Avail = snoop_out_avail(&SnoopState);
    bool Due = Avail && (Avail >= SnoopBatchBytes || Now - SnoopLastSendMs >= SnoopSendEveryMs);
 #ifdef FeatTCPListen

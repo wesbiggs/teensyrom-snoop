@@ -31,7 +31,14 @@ class Glue(unittest.TestCase):
         self.assertEqual(dec.lost_frames, 0)
         self.assertIn(dec.bad_frames, (1, 2))   # the two ack tokens in the stream (one chunk when no frame went out between them), skipped
         self.assertEqual(sp.ACK in data[2:], True)                              # the status command's ack
-        self.assertGreaterEqual(len([f for f in fr if isinstance(f, sp.Status)]), 2)
+        sts = [f for f in fr if isinstance(f, sp.Status)]
+        self.assertGreaterEqual(len(sts), 2)
+        probed = [st for st in sts if st.probe_cyc]
+        self.assertTrue(probed)                                                 # the CPU probe ran during the run
+        for st in probed:   # 6-cycle reads, a 300-cycle interrupt every 50: 49 * 6 free of 600
+            self.assertAlmostEqual(st.cpu_free, 294 / 600, delta=0.01)
+            self.assertEqual(st.probe_stall, 306)
+            self.assertIn(st.probe_worst, range(480, 500))
         self.assertIsInstance(fr[-1], sp.Bye)
         self.assertEqual(fr[-1].reason, 1)                                      # replaced by the TCP start
 

@@ -36,7 +36,7 @@ the emulator to each write's cycle and write the register. That is what `host/si
    Teensy 3.6). reSIDfp is heavier. Start with reSID in "fast" sampling mode at 48 kHz (the dongle's native rate).
    * **CPU budget, the unknown.** `isrPHI2` runs on every phi2 cycle and takes a large share of the
      600 MHz. It busy-waits to the data setup and hold times, so much of each 1 µs cycle is gone.
-     Measure first: run a `loop()` idle counter against cycles per second with the menu showing and with a game running.
+     Measure first, with the menu showing and with a game running (step 1 below: the main-loop probe in 0.9-sn6).
      Then compare with reSID's cost on an M7 at 48 kHz (reported in the tens of percent of a slower M4 core).
    * **RAM.** reSID's wave tables are about 4 x 4 KB plus filter tables. They go in flash (`PROGMEM`) or RAM2,
      never RAM1 (66 KB free for locals with vdrive).
@@ -70,7 +70,8 @@ the emulator to each write's cycle and write the register. That is what `host/si
 
 ## Suggested order
 
-1. Measure the CPU left over (an idle counter in `loop()`), on hardware, with a busy game.
+1. Measure the CPU left over, on hardware, with a busy game. **In 0.9-sn6:** the main-loop probe (1 ms every
+   100 ms during a capture) reports it in STATUS v4; `trsid.py --isr` prints it. Not yet run on hardware.
 2. Port `render_to` with reSID into a `snoop` consumer. Output to a buffer only, and time it.
 3. Independently of 2: the UAC1 host driver and siTD support, tested with a sine wave on one adaptive dongle,
    and with Ms. Pac-Man running to confirm the host port leaves `isrPHI2` alone (`trsid.py --isr`'s late counts over TCP).

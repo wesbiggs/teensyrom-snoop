@@ -175,11 +175,38 @@ SNOOP_COLD void snoop_init(snoop_t *s, snoop_hot_t *hot)
    s->hot = hot;
    s->flush_us = 2000;
    s->status_ms = 1000;
+   s->probe_worst = 1000;
+}
+
+SNOOP_COLD uint32_t snoop_cpu_probe(snoop_t *s, uint32_t (*cyc)(void), uint32_t window_cyc)
+{
+   const uint32_t start = cyc();
+   uint32_t prev = start, stolen = 0, longest = 0, now;
+   do
+   {
+      now = cyc();
+      const uint32_t d = now - prev;
+      if (d > SNOOP_PROBE_STALL)
+      {
+         stolen += d;
+         if (d > longest) longest = d;
+      }
+      prev = now;
+   } while (now - start < window_cyc);
+   const uint32_t total = now - start;
+   if (total == 0) return 0;   /* window 0 and a counter that did not move */
+   const uint32_t free_cyc = total - stolen;
+   const uint32_t permille = (uint32_t)((uint64_t)free_cyc * 1000u / total);
+   s->probe_cyc += total;
+   s->probe_free += free_cyc;
+   if (permille < s->probe_worst) s->probe_worst = (uint16_t)permille;
+   if (longest > s->probe_stall) s->probe_stall = longest;
+   return free_cyc;
 }
 
 SNOOP_COLD void snoop_status(snoop_t *s)
 {
-   uint8_t p[1 + 2 + 10 + 4 + 4 + 2 + 4 + 3 * 4];
+   uint8_t p[1 + 2 + 10 + 4 + 4 + 2 + 4 + 3 * 4 + 4 + 4 + 2 + 4];
    size_t n = 0;
    frame_close(s);
    p[n++] = SNOOP_F_STATUS;
@@ -190,8 +217,14 @@ SNOOP_COLD void snoop_status(snoop_t *s)
    n += put_u16(p + n, (uint16_t)(s->ring_hiwater > 0xFFFF ? 0xFFFF : s->ring_hiwater));
    n += put_u32(p + n, s->writes);
    for (int i = 0; i < 3; i++) n += put_u32(p + n, s->hot->late[i]);
+   n += put_u32(p + n, s->probe_cyc);
+   n += put_u32(p + n, s->probe_free);
+   n += put_u16(p + n, s->probe_worst);
+   n += put_u32(p + n, s->probe_stall);
    emit(s, p, n);
    s->ring_hiwater = 0;
+   s->probe_cyc = s->probe_free = s->probe_stall = 0;
+   s->probe_worst = 1000;
 }
 
 /* Page map for the ranges; 0 or an error (see snoop_start). */
@@ -254,6 +287,8 @@ SNOOP_COLD int snoop_start(snoop_t *s, const snoop_range_t *ranges, uint8_t nran
    s->out_dropped = 0;
    s->ring_hiwater = 0;
    s->writes = 0;
+   s->probe_cyc = s->probe_free = s->probe_stall = 0;
+   s->probe_worst = 1000;
    s->last_status_us = now_us;
 
    uint8_t p[1 + 1 + 4 + 4 + 1 + 1 + 4 * SNOOP_MAX_RANGES];

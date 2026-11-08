@@ -97,10 +97,12 @@ class Printer:
     def __init__(self, quiet: bool):
         self.quiet = quiet
         self.phi2 = sp.PHI2_PAL
+        self.cpu_hz = 600_000_000
 
     def frame(self, f):
         if isinstance(f, sp.Hello):
             self.phi2 = f.phi2_hz
+            self.cpu_hz = f.cpu_hz
             rs = " ".join(f"{a:04X}-{b:04X}" for a, b in f.ranges)
             print(f"# hello v{f.version} phi2 {f.phi2_hz} Hz, cpu {f.cpu_hz} Hz, gap {f.max_gap}, ranges {rs}")
         elif isinstance(f, sp.Writes):
@@ -111,7 +113,8 @@ class Printer:
                 print(f"{b.time:12d} {secs:10.6f}  {b.addr:04X}: {b.data.hex(' ').upper()}")
         elif isinstance(f, sp.Status):
             print(f"# status t={f.time} writes={f.writes} dropped={f.dropped} out_dropped={f.out_dropped} "
-                  f"ring_hiwater={f.ring_hiwater} late_isr={f.late} >250ns={f.late250} >1us={f.late1000}")
+                  f"ring_hiwater={f.ring_hiwater} late_isr={f.late} >250ns={f.late250} >1us={f.late1000} "
+                  f"{f.probe_text(self.cpu_hz)}".rstrip())
         elif isinstance(f, sp.Bye):
             print(f"# bye ({f.reason_text})")
         sys.stdout.flush()

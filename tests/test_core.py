@@ -268,6 +268,41 @@ class LateIsr(unittest.TestCase):
         self.assertEqual(s2.of(sp.Status)[-1].late, 0)
 
 
+class CpuProbe(unittest.TestCase):
+    def setUp(self):
+        LIB.sim_probe.argtypes = [U32] * 6
+        LIB.sim_probe.restype = U32
+
+    def test_free_share_worst_and_longest(self):
+        s = Sim([(0xD418, 0xD418)])
+        # a read every 8 cycles, a 400-cycle interrupt every 26 reads (~608 cycles: one PAL phi2 at 600 MHz)
+        free1 = LIB.sim_probe(600_000, 8, 26, 400, 0, 0)
+        # no interrupts but one 5000-cycle stall, and gaps under the threshold count as free
+        free2 = LIB.sim_probe(600_000, 30, 0, 0, 100, 5000)
+        s.poll(1, us_step=1)
+        LIB.sim_status()
+        s.drain()
+        st = s.of(sp.Status)[-1]
+        self.assertAlmostEqual(free1 / 600_000, 200 / 608, delta=0.002)   # the interrupted read's own 8 count as taken
+        self.assertGreaterEqual(free2, 600_000 - 5000 - 30)
+        self.assertEqual(st.probe_free, free1 + free2)
+        self.assertGreaterEqual(st.probe_cyc, 1_200_000)
+        self.assertAlmostEqual(st.cpu_free, (free1 + free2) / st.probe_cyc)
+        self.assertIn(st.probe_worst, range(326, 332))      # the first probe's share, per mille
+        self.assertEqual(st.probe_stall, 5030)              # the stall plus the read it delayed
+        # the next STATUS starts afresh
+        LIB.sim_status()
+        s.drain()
+        st = s.of(sp.Status)[-1]
+        self.assertEqual((st.probe_cyc, st.probe_free, st.probe_worst, st.probe_stall), (0, 0, 1000, 0))
+        self.assertIsNone(st.cpu_free)
+
+    def test_version_3_status_still_decodes(self):
+        p = sp.status_payload(1, 2, late=(3, 2, 1))[:-14]
+        st = sp.parse_payload(p)
+        self.assertEqual((st.late, st.late250, st.late1000, st.probe_cyc), (3, 2, 1, 0))
+
+
 class Limits(unittest.TestCase):
     def test_ring_full_counts_drops(self):
         s = Sim([(0xD418, 0xD418)], gap=0)

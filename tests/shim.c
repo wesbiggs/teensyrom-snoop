@@ -39,3 +39,20 @@ void sim_late(uint32_t cyc) { snoop_isr_late(&hot, cyc); }
 uint32_t sim_late_cyc(int i) { return hot.late_cyc[i]; }
 int sim_ring_size(void) { return SNOOP_RING; }
 int sim_out_size(void) { return SNOOP_OUT_SIZE; }
+
+/* CPU probe against a fake cycle counter: each read moves it by `step`; every `every`-th read an
+ * interrupt of `isr` cycles comes first (every 0: none); one read in the whole run takes `once` extra. */
+static uint32_t fake_cyc, fake_step, fake_every, fake_isr, fake_n, fake_once_at, fake_once;
+static uint32_t fake_read(void)
+{
+   fake_n++;
+   fake_cyc += fake_step;
+   if (fake_every && fake_n % fake_every == 0) fake_cyc += fake_isr;
+   if (fake_n == fake_once_at) fake_cyc += fake_once;
+   return fake_cyc;
+}
+uint32_t sim_probe(uint32_t window, uint32_t step, uint32_t every, uint32_t isr, uint32_t once_at, uint32_t once)
+{
+   fake_step = step; fake_every = every; fake_isr = isr; fake_n = 0; fake_once_at = once_at; fake_once = once;
+   return snoop_cpu_probe(&st, fake_read, window);
+}

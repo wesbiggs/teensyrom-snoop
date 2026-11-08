@@ -51,5 +51,7 @@ arrival delay over 6 s + 10 ms, 15-500 ms, slewed), FIFO 30 ms, `sounddevice` lo
 was the lag the owner heard. Not yet on hardware.
 0.9-sn4: snoop's own TCP data port 2113 (`SnoopDataPortService`; the clients try it first, then 2112); host-tested, not
 on hardware. 0.9-sn5: that port is 6581 instead of 2113 (sn4 firmware: the clients fall back to 2112). NativeEthernet's `EthernetServer::available()` blocks up to 10 s for a new client's first bytes.
+0.9-sn6 (phase 2 step 1): the main-loop CPU probe (`snoop_cpu_probe`, 1 ms every 100 ms while a capture runs, STATUS v4,
+`trsid.py --isr` prints `CPU free`); host-tested, not on hardware. It touches no ISR code.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
 file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.

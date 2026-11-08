@@ -1,4 +1,4 @@
-# teensyrom-snoop protocol (version 3)
+# teensyrom-snoop protocol (version 4)
 
 All multi-byte numbers are little-endian unless marked otherwise. `varint` is unsigned LEB128
 (7 bits per byte, low group first, high bit = more).
@@ -81,9 +81,10 @@ STATUS/BYE, so latency is a few ms.
 
 ### STATUS `03`
 
-`03 next_seq:u16 time:varint dropped:u32 out_dropped:u32 ring_hiwater:u16 writes:u32 late:u32 late250:u32 late1000:u32`
+`03 next_seq:u16 time:varint dropped:u32 out_dropped:u32 ring_hiwater:u16 writes:u32 late:u32 late250:u32 late1000:u32 probe_cyc:u32 probe_free:u32 probe_worst:u16 probe_stall:u32`
 
-The three `late` counters are new in version 3. A version 2 STATUS ends after `writes`, and the decoder accepts both.
+The three `late` counters are new in version 3, the four `probe` fields in version 4. A version 2 STATUS ends after
+`writes`, a version 3 one after `late1000`, and the decoder accepts all three.
 
 Once a second, on the status command, and before BYE.
 
@@ -97,6 +98,15 @@ Once a second, on the status command, and before BYE.
   `nS_MaxAdj` after the previous one), more than ~250 ns (a cartridge ROM read answered then can be wrong),
   and more than ~1 us (a bus cycle missed). This is a diagnostic of what else holds the bus interrupt up. It is
   counted in isrPHI2's existing late branch, so on-time cycles pay nothing.
+* `probe_cyc`, `probe_free`, `probe_worst`, `probe_stall` (version 4, firmware 0.9-sn6+): the main-loop CPU probe,
+  **since the last STATUS** (they restart at each one). While a capture runs, the main loop spins for 1 ms every
+  100 ms reading the CPU cycle counter; a gap of more than 40 CPU cycles between two reads is an interrupt
+  (isrPHI2 above all). `probe_cyc` is the CPU cycles probed, `probe_free` those with no interrupt running, so
+  `probe_free / probe_cyc` is the share of the CPU the interrupts leave to the main loop: what an emulator there
+  (phase 2, docs/USB-AUDIO.md) could use. `probe_worst` is the lowest share of any single 1 ms probe, per mille
+  (1000 when none ran), and `probe_stall` the longest single interruption in CPU cycles. Interrupts shorter than
+  40 cycles count as free, so the share is an upper bound. The probe holds the TeensyROM's main loop up for
+  1 ms each time (1% of the time).
 
 ### BYE `04`
 

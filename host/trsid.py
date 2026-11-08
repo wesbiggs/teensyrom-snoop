@@ -52,7 +52,8 @@ def main():
                     "serial, at once on TCP). Every USB transfer briefly stops the bus interrupt: do not go below 20 on USB")
     ap.add_argument("--buffer", type=float, default=0.03, help="live: sound card FIFO target, seconds")
     ap.add_argument("--isr", action="store_true", help="live: print the TeensyROM's late bus-interrupt counts every second "
-                    "(firmware 0.9-sn3+): a cartridge game misbehaves when '>250ns' climbs")
+                    "(firmware 0.9-sn3+): a cartridge game misbehaves when '>250ns' climbs; and the CPU share the "
+                    "interrupts leave to the main loop (0.9-sn6+)")
     a = ap.parse_args()
 
     try:
@@ -122,17 +123,22 @@ def main():
         stream.start()
     end = time.time() + a.seconds if a.seconds else None
     last_status = None
+    cpu_hz, probe_cyc, probe_free = 600_000_000, 0, 0
     try:
         data = rest
         while not (end and time.time() > end):
             for f in dec.feed(data):
                 player.feed(f)
+                if isinstance(f, sp.Hello):
+                    cpu_hz = f.cpu_hz
                 if isinstance(f, sp.Status):
+                    probe_cyc += f.probe_cyc
+                    probe_free += f.probe_free
                     if a.isr and last_status is not None:
                         secs = max((f.time - last_status.time) / player.r.phi2, 1e-3)
                         print(f"# latency {player.latency * 1000:4.0f} ms  late bus interrupts/s: {(f.late - last_status.late) / secs:7.1f}  "
                               f">250ns: {(f.late250 - last_status.late250) / secs:6.1f}  "
-                              f">1us: {(f.late1000 - last_status.late1000) / secs:6.1f}", flush=True)
+                              f">1us: {(f.late1000 - last_status.late1000) / secs:6.1f}  {f.probe_text(cpu_hz)}", flush=True)
                     last_status = f
                 if isinstance(f, sp.Bye):
                     raise KeyboardInterrupt
@@ -158,6 +164,8 @@ def main():
         secs = max(last_status.time / player.r.phi2, 1e-3)
         print(f"# late bus interrupts in {secs:.0f} s: {last_status.late} (>250ns {last_status.late250}, "
               f">1us {last_status.late1000})")
+    if probe_cyc:
+        print(f"# CPU free for the main loop, average: {probe_free * 100 / probe_cyc:.1f}%")
     if a.wav and recorded:
         import numpy as np
         write_wav(a.wav, np.concatenate(recorded), a.rate, channels)

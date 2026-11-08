@@ -29,6 +29,10 @@ uint8_t BusData;
 uint32_t micros() { return NowUs; }
 uint32_t millis() { NowUs += 1; return NowUs / 1000; }   // a millis() spin moves time on
 uint8_t DataPortWaitRead() { return BusData; }
+// the CPU probe's counter reads: 6 cycles each, and an interrupt of 300 cycles every 50 reads
+static uint32_t ProbeReads = 0;
+static uint32_t HostCycles() { ARM_DWT_CYCCNT += 6; if (++ProbeReads % 50 == 0) ARM_DWT_CYCCNT += 300; return ARM_DWT_CYCCNT; }
+#define SnoopCycles() HostCycles()
 
 class Stream {
 public:
