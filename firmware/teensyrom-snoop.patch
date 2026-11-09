@@ -111,10 +111,10 @@ index 0000000..0555a91
 +#endif
 diff --git a/Source/Teensy/WriteSnoop.ino b/Source/Teensy/WriteSnoop.ino
 new file mode 100644
-index 0000000..3fea986
+index 0000000..bedff7c
 --- /dev/null
 +++ b/Source/Teensy/WriteSnoop.ino
-@@ -0,0 +1,417 @@
+@@ -0,0 +1,434 @@
 +// teensyrom-snoop: the main-loop half.  Command 0x6453 from the USB serial or TCP channel, and
 +// SnoopService() from loop().  Protocol: docs/PROTOCOL.md in teensyrom-snoop.
 +
@@ -315,6 +315,14 @@ index 0000000..3fea986
 +   }
 +}
 +
++// A USB Audio volume (1/256 dB) as dB with one decimal, to Out
++FLASHMEM void SnoopAudioDb(Stream *Out, int16_t V)
++{
++   const int32_t Tenths = ((int32_t)V * 10 + (V < 0 ? -128 : 128)) / 256;   // rounded half away from zero
++   const int32_t A = Tenths < 0 ? -Tenths : Tenths;
++   Out->printf(PSTR("%s%ld.%ld"), Tenths < 0 ? PSTR("-") : PSTR(""), (long)(A / 10), (long)(A % 10));
++}
++
 +FLASHMEM void SnoopAudioReport(Stream *Out)
 +{
 +   USBAudioOut::Info i;
@@ -333,7 +341,16 @@ index 0000000..3fea986
 +               i.streaming ? PSTR("streaming") : i.step < 0 ? PSTR("failed") : PSTR("starting"),
 +               (unsigned long)i.iso.frames, (unsigned long)i.iso.errors, (unsigned long)i.iso.missed);
 +   if (i.iso.errors) Out->printf(PSTR(" (last siTD status %02lX)"), (unsigned long)i.iso.status);
-+   if (i.fu) Out->printf(PSTR("; volume %d/256 dB (%d..%d)%s"), i.volume, i.vol_min, i.vol_max, i.unmuted ? PSTR(", unmuted") : PSTR(""));
++   if (i.fu)
++   {
++      Out->printf(PSTR("; volume "));
++      SnoopAudioDb(Out, i.volume);
++      Out->printf(PSTR(" dB ("));
++      SnoopAudioDb(Out, i.vol_min);
++      Out->printf(PSTR(".."));
++      SnoopAudioDb(Out, i.vol_max);
++      Out->printf(PSTR(")%s"), i.unmuted ? PSTR(", unmuted") : PSTR(""));
++   }
 +   else Out->printf(PSTR("; no feature unit"));
 +   if (i.failed_step) Out->printf(PSTR("; %s failed"), SnoopAudioStep(i.failed_step));
 +   Out->printf(PSTR("\n"));
@@ -1158,7 +1175,7 @@ index 2e2ad0b..dab7ec8 100644
  
 diff --git a/Source/Teensy/src/USBHost_t36/USBAudioOut.cpp b/Source/Teensy/src/USBHost_t36/USBAudioOut.cpp
 new file mode 100644
-index 0000000..24b290e
+index 0000000..b730895
 --- /dev/null
 +++ b/Source/Teensy/src/USBHost_t36/USBAudioOut.cpp
 @@ -0,0 +1,181 @@
@@ -1173,7 +1190,7 @@ index 0000000..24b290e
 +enum {
 +	STEP_IDLE = 0,
 +	STEP_SET_INTERFACE,   // select the alternate setting
-+	STEP_SET_RATE,        // SET_CUR sampling frequency on the endpoint (only with more than one rate)
++	STEP_SET_RATE,        // SET_CUR sampling frequency on the endpoint (always: a refusal is noted, not fatal)
 +	STEP_GET_MIN,         // the feature unit's volume range...
 +	STEP_GET_MAX,
 +	STEP_SET_VOLUME,      // ...0 dB clamped into it, on each channel that has volume
@@ -1254,13 +1271,13 @@ index 0000000..24b290e
 +				return;
 +			}
 +			step_ = STEP_SET_RATE;
-+			if (as_.freq_control && as_.rates != 1) {
-+				buf_[0] = (uint8_t)RATE;
-+				buf_[1] = (uint8_t)(RATE >> 8);
-+				buf_[2] = (uint8_t)(RATE >> 16);
-+				if (send(0x22, 0x01, 0x0100, as_.ep, 3)) return;   // SET_CUR SAMPLING_FREQ_CONTROL
-+			}
-+			ok = true;
++			// Sent even when the format lists one rate and when the endpoint claims no rate control, as Linux
++			// and macOS do: the owner's AB13X dongle took sn8's stream (no errors) and stayed silent without it.
++			buf_[0] = (uint8_t)RATE;
++			buf_[1] = (uint8_t)(RATE >> 8);
++			buf_[2] = (uint8_t)(RATE >> 16);
++			if (send(0x22, 0x01, 0x0100, as_.ep, 3)) return;   // SET_CUR SAMPLING_FREQ_CONTROL
++			ok = false;
 +			break;
 +		case STEP_SET_RATE:
 +			if (!ok) failed_step_ = STEP_SET_RATE;   // carry on: the device may run 48 kHz anyway
@@ -1345,7 +1362,7 @@ index 0000000..24b290e
 +}
 diff --git a/Source/Teensy/src/USBHost_t36/USBAudioOut.h b/Source/Teensy/src/USBHost_t36/USBAudioOut.h
 new file mode 100644
-index 0000000..88095cf
+index 0000000..ca0ddda
 --- /dev/null
 +++ b/Source/Teensy/src/USBHost_t36/USBAudioOut.h
 @@ -0,0 +1,69 @@
@@ -1355,7 +1372,7 @@ index 0000000..88095cf
 + * Claims only an AudioStreaming interface with an alternate setting that takes 16-bit stereo PCM at 48 kHz on
 + * an isochronous OUT endpoint (synchronous, adaptive or unsynchronised: no feedback endpoint), full speed only.
 + * Capture and HID interfaces of the same device are left to others.  It selects that alternate setting, sets
-+ * the rate when the device offers more than one, starts the stream (isochronous.h: 48 stereo frames every 1 ms
++ * the rate (SET_CUR on the endpoint; a refusal is not fatal), starts the stream (isochronous.h: 48 stereo frames every 1 ms
 + * frame, asked of the fill function in the USBHS interrupt), then unmutes and sets 0 dB through the feature
 + * unit when there is one.  Unplugging stops the stream; plugging back in starts it again.
 + */

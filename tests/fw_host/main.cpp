@@ -388,7 +388,7 @@ int main()
       std::string t = Text(Au);
       CHECK(Au.out[0] == 0xCC && Au.out[1] == 0x64);
       CHECK(t.find("Snoop audio: tone 1000 Hz; 0020:0B21 interface 2 alt 1 ep 03, streaming; frames 0, errors 0, "
-                   "missed 0; volume 0/256 dB (-11520..0), unmuted\n") != std::string::npos);
+                   "missed 0; volume 0.0 dB (-45.0..0.0), unmuted\n") != std::string::npos);
       // one second of frames: 192 bytes each, left = right, 1000 Hz at -12 dBFS, the same as one continuous tone
       isoaudio_tone_t Ref;
       isoaudio_tone_init(&Ref, 1000, 48000, 8192);
@@ -428,6 +428,17 @@ int main()
       Command(&Au, {0x64, 0x53, 3, 0});                   // tone off: silence
       CHECK(Text(Au).find("Snoop audio: silence; 0020:0B21") != std::string::npos);
       CHECK(SnoopDongle.Frame() == std::vector<uint8_t>(192, 0));
+      // volumes in dB with one decimal: the dongle's range, a refused rate request
+      SnoopDongle.state.volume = -1 * 256 - 128; SnoopDongle.state.vol_min = -15360; SnoopDongle.state.vol_max = 6 * 256 + 13;
+      SnoopDongle.state.failed_step = 2;
+      Au.out.clear();
+      Command(&Au, {0x64, 0x53, 3, 2});
+      CHECK(Text(Au).find("; volume -1.5 dB (-60.0..6.1), unmuted; SET_CUR rate failed\n") != std::string::npos);
+      SnoopDongle.state.volume = -12; SnoopDongle.state.failed_step = 0;   // -0.05 dB rounds to 0.0, not -0.0
+      Au.out.clear();
+      Command(&Au, {0x64, 0x53, 3, 2});
+      CHECK(Text(Au).find("; volume 0.0 dB (") != std::string::npos);
+      SnoopDongle.state.volume = 0; SnoopDongle.state.vol_min = -45 * 256; SnoopDongle.state.vol_max = 0;
       Au.out.clear();
       Command(&Au, {0x64, 0x53, 3, 7});                   // bad mode: refused, nothing changes
       CHECK(Au.out[0] == 0x7F && Au.out[1] == 0x9B && Text(Au).find("mode 0 silence, 1 tone, 2 report") != std::string::npos);

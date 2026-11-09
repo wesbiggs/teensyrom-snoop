@@ -198,6 +198,14 @@ FLASHMEM const char *SnoopAudioStep(uint8_t Step)
    }
 }
 
+// A USB Audio volume (1/256 dB) as dB with one decimal, to Out
+FLASHMEM void SnoopAudioDb(Stream *Out, int16_t V)
+{
+   const int32_t Tenths = ((int32_t)V * 10 + (V < 0 ? -128 : 128)) / 256;   // rounded half away from zero
+   const int32_t A = Tenths < 0 ? -Tenths : Tenths;
+   Out->printf(PSTR("%s%ld.%ld"), Tenths < 0 ? PSTR("-") : PSTR(""), (long)(A / 10), (long)(A % 10));
+}
+
 FLASHMEM void SnoopAudioReport(Stream *Out)
 {
    USBAudioOut::Info i;
@@ -216,7 +224,16 @@ FLASHMEM void SnoopAudioReport(Stream *Out)
                i.streaming ? PSTR("streaming") : i.step < 0 ? PSTR("failed") : PSTR("starting"),
                (unsigned long)i.iso.frames, (unsigned long)i.iso.errors, (unsigned long)i.iso.missed);
    if (i.iso.errors) Out->printf(PSTR(" (last siTD status %02lX)"), (unsigned long)i.iso.status);
-   if (i.fu) Out->printf(PSTR("; volume %d/256 dB (%d..%d)%s"), i.volume, i.vol_min, i.vol_max, i.unmuted ? PSTR(", unmuted") : PSTR(""));
+   if (i.fu)
+   {
+      Out->printf(PSTR("; volume "));
+      SnoopAudioDb(Out, i.volume);
+      Out->printf(PSTR(" dB ("));
+      SnoopAudioDb(Out, i.vol_min);
+      Out->printf(PSTR(".."));
+      SnoopAudioDb(Out, i.vol_max);
+      Out->printf(PSTR(")%s"), i.unmuted ? PSTR(", unmuted") : PSTR(""));
+   }
    else Out->printf(PSTR("; no feature unit"));
    if (i.failed_step) Out->printf(PSTR("; %s failed"), SnoopAudioStep(i.failed_step));
    Out->printf(PSTR("\n"));

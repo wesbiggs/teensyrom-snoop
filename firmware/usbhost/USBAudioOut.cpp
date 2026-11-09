@@ -9,7 +9,7 @@
 enum {
 	STEP_IDLE = 0,
 	STEP_SET_INTERFACE,   // select the alternate setting
-	STEP_SET_RATE,        // SET_CUR sampling frequency on the endpoint (only with more than one rate)
+	STEP_SET_RATE,        // SET_CUR sampling frequency on the endpoint (always: a refusal is noted, not fatal)
 	STEP_GET_MIN,         // the feature unit's volume range...
 	STEP_GET_MAX,
 	STEP_SET_VOLUME,      // ...0 dB clamped into it, on each channel that has volume
@@ -90,13 +90,13 @@ FLASHMEM void USBAudioOut::next_step(bool ok)
 				return;
 			}
 			step_ = STEP_SET_RATE;
-			if (as_.freq_control && as_.rates != 1) {
-				buf_[0] = (uint8_t)RATE;
-				buf_[1] = (uint8_t)(RATE >> 8);
-				buf_[2] = (uint8_t)(RATE >> 16);
-				if (send(0x22, 0x01, 0x0100, as_.ep, 3)) return;   // SET_CUR SAMPLING_FREQ_CONTROL
-			}
-			ok = true;
+			// Sent even when the format lists one rate and when the endpoint claims no rate control, as Linux
+			// and macOS do: the owner's AB13X dongle took sn8's stream (no errors) and stayed silent without it.
+			buf_[0] = (uint8_t)RATE;
+			buf_[1] = (uint8_t)(RATE >> 8);
+			buf_[2] = (uint8_t)(RATE >> 16);
+			if (send(0x22, 0x01, 0x0100, as_.ep, 3)) return;   // SET_CUR SAMPLING_FREQ_CONTROL
+			ok = false;
 			break;
 		case STEP_SET_RATE:
 			if (!ok) failed_step_ = STEP_SET_RATE;   // carry on: the device may run 48 kHz anyway

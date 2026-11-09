@@ -150,7 +150,7 @@ class Descriptors(unittest.TestCase):
         self.assertEqual((s.iface, s.alt, s.ep, s.max_packet, s.interval), (2, 1, 0x03, 384, 1))
         self.assertEqual((s.sync, s.channels, s.subframe, s.bits, s.rates), (3, 2, 2, 16, 1))
         self.assertEqual(s.terminal, 1)
-        self.assertEqual(s.freq_control, 1)    # a control is offered, but one rate only: the driver skips SET_CUR
+        self.assertEqual(s.freq_control, 1)    # a control is offered, one rate only (the driver sets it anyway, from sn9)
         # the AudioControl units: the feature unit in the playback path, and which channels to address
         ac = Control()
         self.assertEqual(self.L.isoaudio_parse_control(cfg[9:], len(cfg) - 9, C.byref(ac)), 1)

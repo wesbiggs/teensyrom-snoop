@@ -71,7 +71,8 @@ the emulator to each write's cycle and write the register. That is what `host/si
    * **The owner's dongle** (MOSWAG USB to 3.5 mm adapter; `lsusb -v` on a Pi, 2026-11-08): `0020:0b21` "AB13X USB
      Audio" (a Bluetrum AB13x chip), **full speed**, UAC1. Playback: interface 2, alternate setting 1, endpoint
      `0x03` OUT, isochronous, **synchronous**, `bInterval` 1 (every frame), `wMaxPacketSize` 384, one format only:
-     16-bit stereo PCM at **48000 Hz** (`tSamFreq` has a single entry, so SET_CUR on the rate is likely unnecessary).
+     16-bit stereo PCM at **48000 Hz** (`tSamFreq` has a single entry). On hardware with sn8 it took the stream (no errors) and stayed silent; sn9 always
+     sends SET_CUR of the rate, as Linux and macOS do.
      Also a capture interface (1, endpoint `0x83` IN) and a HID interface (2 interrupt endpoints, the buttons),
      which the driver leaves alone. A synchronous sink takes its sample clock from the start-of-frame, so it wants
      exactly 48 frames (192 bytes) every 1 ms frame, on the Teensy's crystal. The snoop timeline already runs on
@@ -105,6 +106,9 @@ the emulator to each write's cycle and write the register. That is what `host/si
    **In 0.9-sn8 (host-tested and compiled for the M7, not yet on hardware):** isochronous OUT through siTDs in the
    bundled USBHost_t36, a UAC1 output driver, and a 1 kHz test tone switched by command `64 53 03` (protocol 6,
    `trsnoop.py --tone on|off|status`). See "Step 3 in 0.9-sn8" below, and "Trying it on hardware" for the owner's checks.
+   On hardware (owner, 2026-11-09, sn8): the dongle was claimed and streamed (`frames` rising, errors 0, missed 0,
+   0 dB, unmuted) but was silent. **0.9-sn9** always sends `SET_CUR` of the rate (sn8 skipped it with one rate listed)
+   and reports volumes in dB; not yet on hardware.
 4. Connect them: the emulator renders into the siTD ring, samples per frame following phi2.
 5. Compare the dongle's line out with `trsid.py`'s rendering of the same stream (both reSID-family, so the SNR
    test in `tests/test_e2e.py` carries over), recorded through a computer's line in.
@@ -135,8 +139,8 @@ touch the library).
   claiming it), and claims the first AudioStreaming interface with an alternate setting that takes Type I PCM, 2 channels
   of 16 bits, 48000 Hz (in its list or its range), on an isochronous OUT endpoint that is synchronous, adaptive or
   unsynchronised and carries at least 192 bytes. Capture and HID interfaces stay free. Full speed only. Then:
-  `SET_INTERFACE` to that alternate setting; `SET_CUR` of the sampling rate only when the format lists more than one rate
-  (the owner's dongle lists one); the stream starts; then, through the feature unit downstream of the stream's input
+  `SET_INTERFACE` to that alternate setting; `SET_CUR` of the sampling rate on the endpoint (sn8 sent it only when the
+  format listed more than one rate, and the owner's dongle stayed silent; from sn9 always, a refusal only noted); the stream starts; then, through the feature unit downstream of the stream's input
   terminal (if any), the volume is set to 0 dB clamped into its `GET_MIN`..`GET_MAX` range and mute is switched off. A
   refused request is noted in the report and skipped, except `SET_INTERFACE`, without which nothing streams.
   Unplugging stops the stream and unlinks the siTDs; plugging back in goes through all of it again.
@@ -156,15 +160,16 @@ touch the library).
 * **Risks only hardware can settle.** That the i.MX RT's embedded transaction translator runs siTDs for a full-speed
   device on the root port (the EHCI way, which the library's interrupt QHs already rely on, with hub address 0 and port
   0); that a siTD's interrupt-on-complete raises the periodic interrupt (UPI; the driver also enables the plain USB
-  interrupt, UI, while streaming, in case it does not); that the dongle plays with no `SET_CUR` of the rate.
+  interrupt, UI, while streaming, in case it does not); that the dongle plays once it has the rate (sn8, without it: streaming, no errors, silent).
 
-## Trying it on hardware (0.9-sn8)
+## Trying it on hardware (0.9-sn9)
 
-1. **Flash** `TeensyROM+_0.9-sn8_full.hex` (CI's `firmware` artifact, or build it as in the README). The TR menu's top line
-   reads `v0.9-sn8`. Plug the dongle straight into the TeensyROM's USB host port (no hub for the first try), and connect
+1. **Flash** `TeensyROM+_0.9-sn9_full.hex` (CI's `firmware` artifact, or build it as in the README). The TR menu's top line
+   reads `v0.9-sn9`. Plug the dongle straight into the TeensyROM's USB host port (no hub for the first try), and connect
    its 3.5 mm output to an amplifier or powered speakers at a low volume: the tone is -12 dBFS at the dongle's 0 dB.
 2. **Is it streaming?** `host/trsnoop.py --tcp <ip> --tone status`, twice a few seconds apart. Expected:
-   `Snoop audio: silence; 0020:0B21 interface 2 alt 1 ep 03, streaming; frames N, errors 0, missed 0; volume ... unmuted`,
+   `Snoop audio: silence; 0020:0B21 interface 2 alt 1 ep 03, streaming; frames N, errors 0, missed 0; volume 0.0 dB (-60.0..0.0), unmuted`
+   (the volume is what was set, 0 dB, and the dongle's range; `SET_CUR rate failed` at the end means it refused the rate),
    with `frames` rising by ~1000 a second. If not:
    * `no USB audio device`: it was not claimed (the bracket says why, if an audio interface was offered).
    * `starting` that stays: a setup request never finished. `failed` / `SET_INTERFACE failed`: the device refused it.

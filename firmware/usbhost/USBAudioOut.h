@@ -4,7 +4,7 @@
  * Claims only an AudioStreaming interface with an alternate setting that takes 16-bit stereo PCM at 48 kHz on
  * an isochronous OUT endpoint (synchronous, adaptive or unsynchronised: no feedback endpoint), full speed only.
  * Capture and HID interfaces of the same device are left to others.  It selects that alternate setting, sets
- * the rate when the device offers more than one, starts the stream (isochronous.h: 48 stereo frames every 1 ms
+ * the rate (SET_CUR on the endpoint; a refusal is not fatal), starts the stream (isochronous.h: 48 stereo frames every 1 ms
  * frame, asked of the fill function in the USBHS interrupt), then unmutes and sets 0 dB through the feature
  * unit when there is one.  Unplugging stops the stream; plugging back in starts it again.
  */

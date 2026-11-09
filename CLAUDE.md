@@ -92,5 +92,8 @@ confirmed). Step 2 done; next is step 3, the USB audio host driver.
 vdrive, both orders; `isrPHI2`/`SnoopTap` identical to sn7) and builds in CI with Teensyduino 1.61: main image RAM1 free for
 locals 73276 (sn7: 74876). **Not yet on hardware**: the owner's
 checklist is in docs/USB-AUDIO.md ("Trying it on hardware"). Open risks: the embedded TT running siTDs, UPI for siTD IOC.
+sn8 on hardware (owner, 2026-11-09): the dongle was claimed and streamed (frames ~1000/s, errors 0, missed 0, 0 dB,
+unmuted) but was silent. 0.9-sn9: `SET_CUR` of the rate always (sn8 skipped it with one rate listed; a refusal is only
+noted), volumes reported in dB. Not yet on hardware.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
 file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.
