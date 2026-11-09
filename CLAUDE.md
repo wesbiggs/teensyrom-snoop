@@ -94,7 +94,8 @@ locals 73276 (sn7: 74876). **Not yet on hardware**: the owner's
 checklist is in docs/USB-AUDIO.md ("Trying it on hardware"). Open risks: the embedded TT running siTDs, UPI for siTD IOC.
 sn8 on hardware (owner, 2026-11-09): the dongle was claimed and streamed (frames ~1000/s, errors 0, missed 0, 0 dB,
 unmuted) but was silent. 0.9-sn9: `SET_CUR` of the rate always (sn8 skipped it with one rate listed; a refusal is only
-noted), volumes reported in dB. **sn9 on hardware (owner): the tone plays** with the dongle on the host port; through a
+noted), volumes reported in dB. **sn9 on hardware (owner): the tone plays** with the dongle on the host port; with Ms. Pac-Man (179 s, TCP): no
+phi2 >250 ns late, no crash, audio errors/missed 0, CPU free 42.1% (sn6 43.3%); player latency 299 ms was the WiFi; through a
 USB 2.0 hub (FE1.1s, single TT) streaming, no errors, silent: parked (suspect the 188+4 split or the start microframe).
 **The TR menu's firmware update faults with the dongle plugged in** (`FXUtil.cpp` leaves `IRQ_USBHS` on; the fill code
 is in flash): sn8 to sn9 left only MinimalBoot (Teensy Loader recovered it). Fix (not yet done): mask `IRQ_USBHS` there.

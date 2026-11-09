@@ -115,6 +115,10 @@ the emulator to each write's cycle and write the register. That is what `host/si
    split (begin/end) or the start microframe; a test with 188-byte packets and a chosen microframe would tell. **Parked**
    (owner): no hub for now. Whether sn8's silent run was on the hub is not known, so sn9's `SET_CUR` of the rate is
    not proven necessary (harmless either way).
+   **With Ms. Pac-Man (owner, 2026-11-09, sn9 without reSID, TCP, 179 s, tone on): no phi2 interrupt late by >250 ns
+   (64914 small ones, ~360/s, as over TCP before the dongle), CPU free 42.1% (sn6: 43.3%, so ~1 point for the
+   refill), no crash, the tone clean, and on port 2112 `frames 339705, errors 0, missed 0`.** The live player's
+   latency rose to 299 ms (sn7r: 107 ms), but a shorter run with the dongle unplugged reached 245 ms: the WiFi.
 4. Connect them: the emulator renders into the siTD ring, samples per frame following phi2.
 5. Compare the dongle's line out with `trsid.py`'s rendering of the same stream (both reSID-family, so the SNR
    test in `tests/test_e2e.py` carries over), recorded through a computer's line in.
