@@ -119,6 +119,8 @@ the emulator to each write's cycle and write the register. That is what `host/si
    (64914 small ones, ~360/s, as over TCP before the dongle), CPU free 42.1% (sn6: 43.3%, so ~1 point for the
    refill), no crash, the tone clean, and on port 2112 `frames 339705, errors 0, missed 0`.** The live player's
    latency rose to 299 ms (sn7r: 107 ms), but a shorter run with the dongle unplugged reached 245 ms: the WiFi.
+   Unplug and replug (owner): passes. **Step 3 done on hardware** (with the dongle on the host port, no hub).
+   **0.9-sn10** fixes the menu's firmware update with a dongle in (below, step 1); not yet on hardware.
 4. Connect them: the emulator renders into the siTD ring, samples per frame following phi2.
 5. Compare the dongle's line out with `trsid.py`'s rendering of the same stream (both reSID-family, so the SNR
    test in `tests/test_e2e.py` carries over), recorded through a computer's line in.
@@ -178,11 +180,13 @@ touch the library).
    reads `v0.9-sn9`. Plug the dongle straight into the TeensyROM's USB host port (no hub for the first try), and connect
    its 3.5 mm output to an amplifier or powered speakers at a low volume: the tone is -12 dBFS at the dongle's 0 dB.
    No hub: through the owner's FE1.1s hub it streams silently (see step 3 above).
-   **Unplug the dongle before a firmware update from the TR menu** (sn8 and sn9). The updater (`FXUtil.cpp`) masks the
-   phi2, menu button, Ethernet and PIT interrupts before it copies the new image over flash, but not `IRQ_USBHS`; with a
-   dongle in, that interrupt runs the fill code (in flash) every 1 ms, so the copy faults once it erases the main
-   image. It happened (owner, sn8 to sn9): MinimalBoot then says `Invalid magic numbers, main flash image not found`.
-   Recovery: Teensy Loader (the Teensy's program button), which does not depend on the firmware.
+   **While sn8 or sn9 is installed, unplug the dongle before a firmware update from the TR menu.** The updater
+   (`FXUtil.cpp`) masks the phi2, menu button, Ethernet and PIT interrupts before it copies the new image over flash, but
+   not `IRQ_USBHS`; with a dongle in, that interrupt runs the fill code (in flash) every 1 ms, so the copy faults once
+   it erases the main image. It happened (owner, sn8 to sn9): MinimalBoot then says `Invalid magic numbers, main flash
+   image not found`. Recovery: Teensy Loader (the Teensy's program button), which does not depend on the firmware.
+   The running image does the copy, so the fix helps from the update *after* sn10 is installed: sn10's patch masks
+   `IRQ_USBHS` there too. To check it, update sn10 to itself from the menu with the dongle in and the tone on.
 2. **Is it streaming?** `host/trsnoop.py --tcp <ip> --tone status`, twice a few seconds apart. Expected:
    `Snoop audio: silence; 0020:0B21 interface 2 alt 1 ep 03, streaming; frames N, errors 0, missed 0; volume 0.0 dB (-60.0..0.0), unmuted`
    (the volume is what was set, 0 dB, and the dongle's range; `SET_CUR rate failed` at the end means it refused the rate),

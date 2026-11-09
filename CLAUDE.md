@@ -98,6 +98,8 @@ noted), volumes reported in dB. **sn9 on hardware (owner): the tone plays** with
 phi2 >250 ns late, no crash, audio errors/missed 0, CPU free 42.1% (sn6 43.3%); player latency 299 ms was the WiFi; through a
 USB 2.0 hub (FE1.1s, single TT) streaming, no errors, silent: parked (suspect the 188+4 split or the start microframe).
 **The TR menu's firmware update faults with the dongle plugged in** (`FXUtil.cpp` leaves `IRQ_USBHS` on; the fill code
-is in flash): sn8 to sn9 left only MinimalBoot (Teensy Loader recovered it). Fix (not yet done): mask `IRQ_USBHS` there.
+is in flash): sn8 to sn9 left only MinimalBoot (Teensy Loader recovered it). Unplug and replug passes: step 3 done.
+0.9-sn10: the patch masks `IRQ_USBHS` in `Flash/FXUtil.cpp` before `flash_move` (the running image does the copy, so it
+protects updates made from sn10 on). Not yet on hardware: update sn10 to itself from the menu with the tone on.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
 file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.

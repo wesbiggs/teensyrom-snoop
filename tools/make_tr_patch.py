@@ -4,7 +4,7 @@
   tools/make_tr_patch.py /path/to/TeensyROM [--out firmware/teensyrom-snoop.patch]
 
 Works on `git archive HEAD` of that checkout (its own uncommitted edits are ignored), copies
-core/ to Source/Teensy/snoop/ and firmware/WriteSnoop.{h,ino} to Source/Teensy/, and makes five
+core/ to Source/Teensy/snoop/ and firmware/WriteSnoop.{h,ino} to Source/Teensy/, and makes six
 small edits that each assert on upstream's text:
 
   TeensyROM.h      #define FeatWriteSnoop (main image only; MinimalBoot never sees it)
@@ -12,6 +12,8 @@ small edits that each assert on upstream's text:
   ISRs.c           the tap, after the Kernal Replace snoop and before the PLA decode wait; and the
                    late-interrupt count at the end of the "late" branch (teensyrom-vdrive edits its top)
   SerUSBIO.ino     token 0x6453 in ProcessCommand's always-available switch
+  Flash/FXUtil.cpp the menu's firmware update masks IRQ_USBHS too before flash_move (from sn10): with an
+                   audio dongle in, that interrupt runs flash code every 1 ms and faulted the copy
 
 and, for the USB audio dongle on the host port (phase 2 step 3), copies firmware/usbhost/ to
 Source/Teensy/src/USBHost_t36/ (USBAudioOut, isochronous.h, isoaudio.{h,c}) and edits the vendored library:
@@ -177,6 +179,15 @@ def main():
              "         return;\n"
              "   #endif\n"
              "      case ResetC64Token:   //Reset C64\n")
+
+        edit(tree, f"{T}/Flash/FXUtil.cpp",
+             "  NVIC_DISABLE_IRQ(IRQ_PIT);\n",
+             "  NVIC_DISABLE_IRQ(IRQ_PIT);\n"
+             "#ifdef FeatWriteSnoop\n"
+             "  //teensyrom-snoop: with a USB audio dongle in, the USB host interrupt runs code in flash every 1 ms\n"
+             "  //  (the sample fill), which faults once flash_move erases it.  The new image is in the buffer by now.\n"
+             "  NVIC_DISABLE_IRQ(IRQ_USBHS);\n"
+             "#endif\n")
 
         usbhost_edits(tree)
 
