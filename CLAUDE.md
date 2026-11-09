@@ -94,6 +94,9 @@ locals 73276 (sn7: 74876). **Not yet on hardware**: the owner's
 checklist is in docs/USB-AUDIO.md ("Trying it on hardware"). Open risks: the embedded TT running siTDs, UPI for siTD IOC.
 sn8 on hardware (owner, 2026-11-09): the dongle was claimed and streamed (frames ~1000/s, errors 0, missed 0, 0 dB,
 unmuted) but was silent. 0.9-sn9: `SET_CUR` of the rate always (sn8 skipped it with one rate listed; a refusal is only
-noted), volumes reported in dB. Not yet on hardware.
+noted), volumes reported in dB. **sn9 on hardware (owner): the tone plays** with the dongle on the host port; through a
+USB 2.0 hub (FE1.1s, single TT) streaming, no errors, silent: parked (suspect the 188+4 split or the start microframe).
+**The TR menu's firmware update faults with the dongle plugged in** (`FXUtil.cpp` leaves `IRQ_USBHS` on; the fill code
+is in flash): sn8 to sn9 left only MinimalBoot (Teensy Loader recovered it). Fix (not yet done): mask `IRQ_USBHS` there.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
 file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.

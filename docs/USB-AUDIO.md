@@ -108,7 +108,13 @@ the emulator to each write's cycle and write the register. That is what `host/si
    `trsnoop.py --tone on|off|status`). See "Step 3 in 0.9-sn8" below, and "Trying it on hardware" for the owner's checks.
    On hardware (owner, 2026-11-09, sn8): the dongle was claimed and streamed (`frames` rising, errors 0, missed 0,
    0 dB, unmuted) but was silent. **0.9-sn9** always sends `SET_CUR` of the rate (sn8 skipped it with one rate listed)
-   and reports volumes in dB; not yet on hardware.
+   and reports volumes in dB. **sn9 on hardware (owner, 2026-11-09): the 1 kHz tone plays** with the dongle straight
+   on the host port. Through a USB 2.0 hub (`1a40:0101`, a Terminus FE1.1s: single TT) it streams the same (`frames`
+   ~1000/s, errors 0, missed 0, 0 dB, unmuted) and is silent: the hub's transaction translator drops the packets, and a
+   start-split for isochronous OUT has no handshake, so nothing reaches the error count. Suspects: the 188 + 4 byte
+   split (begin/end) or the start microframe; a test with 188-byte packets and a chosen microframe would tell. **Parked**
+   (owner): no hub for now. Whether sn8's silent run was on the hub is not known, so sn9's `SET_CUR` of the rate is
+   not proven necessary (harmless either way).
 4. Connect them: the emulator renders into the siTD ring, samples per frame following phi2.
 5. Compare the dongle's line out with `trsid.py`'s rendering of the same stream (both reSID-family, so the SNR
    test in `tests/test_e2e.py` carries over), recorded through a computer's line in.
@@ -167,6 +173,12 @@ touch the library).
 1. **Flash** `TeensyROM+_0.9-sn9_full.hex` (CI's `firmware` artifact, or build it as in the README). The TR menu's top line
    reads `v0.9-sn9`. Plug the dongle straight into the TeensyROM's USB host port (no hub for the first try), and connect
    its 3.5 mm output to an amplifier or powered speakers at a low volume: the tone is -12 dBFS at the dongle's 0 dB.
+   No hub: through the owner's FE1.1s hub it streams silently (see step 3 above).
+   **Unplug the dongle before a firmware update from the TR menu** (sn8 and sn9). The updater (`FXUtil.cpp`) masks the
+   phi2, menu button, Ethernet and PIT interrupts before it copies the new image over flash, but not `IRQ_USBHS`; with a
+   dongle in, that interrupt runs the fill code (in flash) every 1 ms, so the copy faults once it erases the main
+   image. It happened (owner, sn8 to sn9): MinimalBoot then says `Invalid magic numbers, main flash image not found`.
+   Recovery: Teensy Loader (the Teensy's program button), which does not depend on the firmware.
 2. **Is it streaming?** `host/trsnoop.py --tcp <ip> --tone status`, twice a few seconds apart. Expected:
    `Snoop audio: silence; 0020:0B21 interface 2 alt 1 ep 03, streaming; frames N, errors 0, missed 0; volume 0.0 dB (-60.0..0.0), unmuted`
    (the volume is what was set, 0 dB, and the dongle's range; `SET_CUR rate failed` at the end means it refused the rate),
