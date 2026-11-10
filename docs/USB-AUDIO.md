@@ -131,7 +131,8 @@ the emulator to each write's cycle and write the register. That is what `host/si
    `underruns 3, trimmed 138.2 ms` since mode 3 was set (earlier runs and their ends included: three ~50 ms stalls
    of the main loop somewhere, probably at a start; not audible). **Step 4 done.** 0.9-sn12r counts them per capture,
    leaves the drain after a capture out, and puts them in STATUS (protocol 8) so `trsid.py --isr` shows the second a
-   stall happens in; not yet on hardware.
+   stall happens in. **sn12r on hardware (owner, 2026-11-10):** the stalls are not the status queries; they come with
+   the cartridge (.crt) starting up or during play. Accepted as they are (owner): not audible enough to matter.
 5. Compare the dongle's line out with `trsid.py`'s rendering of the same stream (both reSID-family, so the SNR
    test in `tests/test_e2e.py` carries over), recorded through a computer's line in.
 

@@ -109,6 +109,7 @@ output); the r image built locally with Teensyduino 1.61 (RAM1 free 69116, isrPH
 `underruns 3, trimmed 138 ms` cumulative since mode 3 (several runs; ~50 ms loop stalls, not audible). Step 4 done.
 0.9-sn12r (protocol 8): the ring's counts per capture (the drain after a stop is not an underrun:
 `isoaudio_ring_packet` returns 1 on underrun, the glue counts it while `SnoopState.running`), folded into STATUS
-`audio_low/under/trim` each loop pass (`SnoopSidFold`); `trsid.py --isr` prints them each second. Not yet on hardware.
+`audio_low/under/trim` each loop pass (`SnoopSidFold`); `trsid.py --isr` prints them each second. On hardware (owner):
+the stalls come with the .crt starting or during play, not the status queries; accepted as they are.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
 file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.
