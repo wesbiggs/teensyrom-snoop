@@ -7,7 +7,7 @@
 
 Ranges are hex, inclusive: D418, D400-D41C, D400+29.  Ctrl-C sends the stop command.
 --raw writes the channel bytes as received (replay them with --replay).
-Serial needs pyserial (pip install pyserial); TCP uses the TeensyROM's port 2112.
+Serial needs pyserial (pip install pyserial); TCP uses snoop's data port 6581 (the TeensyROM's port 2112 with firmware before sn4).
 """
 from __future__ import annotations
 
@@ -130,7 +130,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--port", help="TeensyROM USB serial port")
-    g.add_argument("--tcp", help="TeensyROM IP address (TCP 2112)")
+    g.add_argument("--tcp", help="TeensyROM IP address (snoop data port 6581; see --tcp-port)")
     g.add_argument("--replay", help="decode a file written with --raw")
     ap.add_argument("--tcp-port", type=int, help="default: the snoop data port 6581, or 2112 when the firmware has none")
     ap.add_argument("--range", action="append", default=[], help="hex address or range (repeatable)")
