@@ -12,6 +12,7 @@ import snoopproto as sp  # noqa: E402
 LIB = ctypes.CDLL(os.path.join(ROOT, "build", "libsnoop.so"))
 U32 = ctypes.c_uint32
 LIB.sim_poll.argtypes = [U32, U32]
+LIB.sim_audio.argtypes = [ctypes.c_uint16, U32, U32]
 LIB.sim_poll.restype = U32
 LIB.sim_stop.argtypes = [ctypes.c_int, U32, U32]
 LIB.sim_bus.argtypes = [ctypes.c_uint16, ctypes.c_uint8, U32]
@@ -298,7 +299,7 @@ class CpuProbe(unittest.TestCase):
         self.assertIsNone(st.cpu_free)
 
     def test_version_3_status_still_decodes(self):
-        p = sp.status_payload(1, 2, late=(3, 2, 1))[:-22]
+        p = sp.status_payload(1, 2, late=(3, 2, 1))[:-32]
         st = sp.parse_payload(p)
         self.assertEqual((st.late, st.late250, st.late1000, st.probe_cyc), (3, 2, 1, 0))
 
@@ -340,8 +341,29 @@ class Consumer(unittest.TestCase):
         self.assertEqual(st[-1].emu_text(), "")
 
     def test_version_4_status_still_decodes(self):
-        st = sp.parse_payload(sp.status_payload(1, 2, probe=(5, 4, 800, 3))[:-8])
+        st = sp.parse_payload(sp.status_payload(1, 2, probe=(5, 4, 800, 3))[:-18])
         self.assertEqual((st.probe_cyc, st.probe_worst, st.emu_c64), (5, 800, 0))
+
+    def test_version_5_status_still_decodes(self):
+        st = sp.parse_payload(sp.status_payload(1, 2, emu=(7, 9), audio=(100, 2, 3))[:-10])
+        self.assertEqual((st.emu_cyc, st.emu_c64, st.audio_low, st.audio_under, st.audio_trim), (7, 9, sp.AUDIO_NONE, 0, 0))
+        self.assertEqual(st.audio_text(), "")
+
+    def test_dongle_buffer_in_status_and_cleared(self):
+        s = Sim([(0xD418, 0xD418)])
+        LIB.sim_status()
+        LIB.sim_audio(600, 0, 0)
+        LIB.sim_audio(470, 2, 1520)
+        LIB.sim_audio(900, 1, 0)
+        LIB.sim_status()
+        LIB.sim_status()
+        s.drain()
+        st = s.of(sp.Status)
+        self.assertEqual((st[-3].audio_low, st[-3].audio_under, st[-3].audio_trim), (sp.AUDIO_NONE, 0, 0))
+        self.assertEqual((st[-2].audio_low, st[-2].audio_under, st[-2].audio_trim), (470, 3, 1520))
+        self.assertEqual(st[-2].audio_text(), "dongle lowest  9.8 ms, underruns 3, trimmed 31.7 ms")
+        self.assertEqual((st[-1].audio_low, st[-1].audio_under, st[-1].audio_trim), (sp.AUDIO_NONE, 0, 0))
+        self.assertEqual(st[-1].audio_text(), "")
 
 
 class Limits(unittest.TestCase):

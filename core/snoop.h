@@ -22,7 +22,8 @@
 extern "C" {
 #endif
 
-#define SNOOP_PROTO_VERSION 7
+#define SNOOP_PROTO_VERSION 8
+#define SNOOP_AUDIO_NONE    0xFFFF   /* STATUS audio_low: no packet of the emulator's samples since the last STATUS */
 
 #ifndef SNOOP_MAX_RANGES
 #define SNOOP_MAX_RANGES   16     /* address ranges per start command */
@@ -183,6 +184,12 @@ typedef struct {
    void          *on_write_ctx;
    uint32_t       emu_cyc;        /* CPU cycles the consumer took (wall time: interrupts included) */
    uint32_t       emu_c64;        /* C64 cycles it emulated */
+   /* The USB audio dongle playing the emulator (version 8), from the glue, since the last STATUS: the fewest
+    * samples buffered when a packet was taken (SNOOP_AUDIO_NONE: none taken), packets short of samples
+    * (underruns), samples skipped to get back to the buffer's target after a stall (trimmed). */
+   uint16_t       audio_low;
+   uint32_t       audio_under;
+   uint32_t       audio_trim;
 
    /* output FIFO */
    uint8_t        out[SNOOP_OUT_SIZE];

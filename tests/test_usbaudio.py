@@ -35,7 +35,7 @@ class Tone(C.Structure):
 class Ring(C.Structure):
     _fields_ = [("buf", C.POINTER(C.c_int16)), ("mask", C.c_uint32), ("head", C.c_uint32), ("tail", C.c_uint32),
                 ("target", C.c_uint32), ("trim_above", C.c_uint32), ("playing", C.c_uint8), ("last", C.c_int16),
-                ("underruns", C.c_uint32), ("trimmed", C.c_uint32), ("dropped", C.c_uint32), ("low", C.c_uint32)]
+                ("trimmed", C.c_uint32), ("dropped", C.c_uint32), ("low", C.c_uint32)]
 
 
 def lib():
@@ -61,6 +61,7 @@ def lib():
     L.isoaudio_ring_put.argtypes = [C.POINTER(Ring), C.POINTER(C.c_int16), C.c_uint32]
     L.isoaudio_ring_put.restype = C.c_uint32
     L.isoaudio_ring_packet.argtypes = [C.POINTER(Ring), C.c_char_p, C.c_uint32]
+    L.isoaudio_ring_packet.restype = C.c_int
     return L
 
 
@@ -405,6 +406,7 @@ class SampleRing(unittest.TestCase):
         cls.L = lib()
 
     def ring(self, size=1024, target=480, trim=1440):
+        self.underruns = 0
         r = Ring()
         self.mem = (C.c_int16 * size)()
         self.L.isoaudio_ring_init(C.byref(r), self.mem, size, target, trim)
@@ -417,7 +419,8 @@ class SampleRing(unittest.TestCase):
     def packet(self, r, frames=48):
         buf = C.create_string_buffer(frames * 4 + 4)
         buf[frames * 4] = b"\xEE"
-        self.L.isoaudio_ring_packet(C.byref(r), buf, frames)
+        self.under = self.L.isoaudio_ring_packet(C.byref(r), buf, frames)
+        self.underruns += self.under
         self.assertEqual(buf.raw[frames * 4], 0xEE)                     # exactly 4 * frames bytes
         s = struct.unpack(f"<{frames * 2}h", buf.raw[:frames * 4])
         self.assertEqual(s[0::2], s[1::2])                              # both channels the same
@@ -432,7 +435,7 @@ class SampleRing(unittest.TestCase):
         self.put(r, [480])
         self.assertEqual(self.packet(r), list(range(1, 49)))
         self.assertEqual(self.packet(r), list(range(49, 97)))
-        self.assertEqual((r.underruns, r.trimmed, r.dropped, r.low), (0, 0, 0, 432))
+        self.assertEqual((self.underruns, r.trimmed, r.dropped, r.low), (0, 0, 0, 432))
 
     def test_steady_producer_never_underruns_and_wraps(self):
         r = self.ring(size=1024)
@@ -449,7 +452,7 @@ class SampleRing(unittest.TestCase):
         played = got[start:]
         self.assertEqual(played, want[:len(played)])                    # every sample once, in order, across wraps
         self.assertGreater(len(played), 2900 * 48)
-        self.assertEqual((r.underruns, r.trimmed, r.dropped), (0, 0, 0))
+        self.assertEqual((self.underruns, r.trimmed, r.dropped), (0, 0, 0))
 
     def test_underrun_holds_the_last_sample_and_waits_again(self):
         r = self.ring()
@@ -460,10 +463,10 @@ class SampleRing(unittest.TestCase):
         p = self.packet(r)
         self.assertEqual(p[:20], [580 + i for i in range(20)])
         self.assertEqual(p[20:], [599] * 28)                            # held, not dropped to 0
-        self.assertEqual((r.underruns, r.playing), (1, 0))
+        self.assertEqual((self.under, self.underruns, r.playing), (1, 1, 0))
         self.put(r, [7] * 400)
         self.assertEqual(self.packet(r), [599] * 48)                    # below target again: still holding
-        self.assertEqual(r.underruns, 1)                                # waiting is not another underrun
+        self.assertEqual(self.underruns, 1)                             # waiting is not another underrun
         self.put(r, [8] * 80)
         self.assertEqual(self.packet(r), [7] * 48)
 
@@ -490,7 +493,7 @@ class Command(unittest.TestCase):
         import sys
         sys.path.insert(0, os.path.join(ROOT, "host"))
         import snoopproto as sp
-        self.assertEqual(sp.PROTO_VERSION, 7)
+        self.assertEqual(sp.PROTO_VERSION, 8)
         self.assertEqual(sp.audio_command(sp.AUDIO_TONE), bytes([0x64, 0x53, 3, 1]))
         self.assertEqual(sp.audio_command(sp.AUDIO_SILENCE), bytes([0x64, 0x53, 3, 0]))
         self.assertEqual(sp.audio_command(sp.AUDIO_REPORT), bytes([0x64, 0x53, 3, 2]))

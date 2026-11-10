@@ -127,10 +127,10 @@ index 0000000..0555a91
 +#endif
 diff --git a/Source/Teensy/WriteSnoop.ino b/Source/Teensy/WriteSnoop.ino
 new file mode 100644
-index 0000000..4e3d4ed
+index 0000000..40d02f9
 --- /dev/null
 +++ b/Source/Teensy/WriteSnoop.ino
-@@ -0,0 +1,518 @@
+@@ -0,0 +1,554 @@
 +// teensyrom-snoop: the main-loop half.  Command 0x6453 from the USB serial or TCP channel, and
 +// SnoopService() from loop().  Protocol: docs/PROTOCOL.md in teensyrom-snoop.
 +
@@ -223,6 +223,19 @@ index 0000000..4e3d4ed
 +DMAMEM int16_t SnoopSidRingBuf[SnoopSidRingSize];
 +isoaudio_ring_t SnoopSidRing;
 +bool SnoopSidFeed = false;                   // audio mode 3: the samples go to the ring
++// The ring's counts for this capture (0.9-sn12): underruns while a capture runs (the drain after it is not
++// one), counted by the USB interrupt; the lowest fill since the last audio report; what STATUS already has.
++volatile uint32_t SnoopSidUnderruns = 0;
++uint32_t SnoopSidLowReport = 0xFFFFFFFFu;
++uint32_t SnoopSidSeenUnder = 0, SnoopSidSeenTrim = 0;
++
++FLASHMEM void SnoopSidCountsReset()
++{
++   SnoopSidUnderruns = 0;
++   SnoopSidRing.trimmed = SnoopSidRing.dropped = 0;
++   SnoopSidRing.low = SnoopSidLowReport = 0xFFFFFFFFu;
++   SnoopSidSeenUnder = SnoopSidSeenTrim = 0;
++}
 +
 +FLASHMEM void SnoopSidClockTo(uint64_t Time)
 +{
@@ -260,6 +273,7 @@ index 0000000..4e3d4ed
 +   SnoopSid->set_sampling_parameters(SnoopPhi2Hz(), reSID::SAMPLE_FAST, SnoopSidRate);
 +   SnoopSid->reset();
 +   SnoopSidAt = 0;
++   SnoopSidCountsReset();   // the dongle's counts are per capture
 +   SnoopState.on_write = SnoopSidWrite;
 +   SnoopState.on_write_ctx = NULL;
 +}
@@ -326,7 +340,24 @@ index 0000000..4e3d4ed
 +uint8_t SnoopSidMs = SnoopSidDefaultMs;
 +FLASHMEM void SnoopSidSource(uint8_t *Packet, uint32_t Frames)
 +{
-+   isoaudio_ring_packet(&SnoopSidRing, Packet, Frames);
++   if (isoaudio_ring_packet(&SnoopSidRing, Packet, Frames) && SnoopState.running) SnoopSidUnderruns++;
++}
++
++// From SnoopService, before snoop_poll (which may send STATUS): what the dongle's buffer did since the last pass,
++// into the STATUS fields (version 8).  Taking the lowest fill and starting it afresh can lose one packet's value
++// if the interrupt comes in between: harmless for a minimum taken every pass.
++FLASHMEM void SnoopSidFold()
++{
++   if (SnoopAudioSource != SnoopSidSource) return;
++   const uint32_t Low = SnoopSidRing.low;
++   SnoopSidRing.low = 0xFFFFFFFFu;
++   if (Low < SnoopSidLowReport) SnoopSidLowReport = Low;
++   if (Low < SnoopState.audio_low) SnoopState.audio_low = (uint16_t)Low;
++   const uint32_t U = SnoopSidUnderruns, T = SnoopSidRing.trimmed;
++   SnoopState.audio_under += U - SnoopSidSeenUnder;
++   SnoopState.audio_trim += T - SnoopSidSeenTrim;
++   SnoopSidSeenUnder = U;
++   SnoopSidSeenTrim = T;
 +}
 +#endif
 +
@@ -407,15 +438,16 @@ index 0000000..4e3d4ed
 +   if (i.failed_step) Out->printf(PSTR("; %s failed"), SnoopAudioStep(i.failed_step));
 +#ifdef SNOOP_RESID_H
 +   if (SnoopAudioSource == SnoopSidSource)
-+   {  // the ring: buffered now, the lowest since the last report (at a packet), underruns, trimmed, dropped
-+      const uint32_t Low = SnoopSidRing.low;
-+      SnoopSidRing.low = 0xFFFFFFFFu;
++   {  // the ring: buffered now, the lowest since the last report (at a packet); this capture's underruns, trimmed, dropped
++      const uint32_t RingLow = SnoopSidRing.low;
++      const uint32_t Low = RingLow < SnoopSidLowReport ? RingLow : SnoopSidLowReport;
++      SnoopSidRing.low = SnoopSidLowReport = 0xFFFFFFFFu;
 +      Out->printf(PSTR("; SID buffered "));
 +      SnoopAudioMs(Out, isoaudio_ring_fill(&SnoopSidRing));
 +      Out->printf(PSTR(" ms, lowest "));
 +      if (Low == 0xFFFFFFFFu) Out->printf(PSTR("-"));
 +      else SnoopAudioMs(Out, Low);
-+      Out->printf(PSTR(" ms, underruns %lu, trimmed "), (unsigned long)SnoopSidRing.underruns);
++      Out->printf(PSTR(" ms, underruns %lu, trimmed "), (unsigned long)SnoopSidUnderruns);
 +      SnoopAudioMs(Out, SnoopSidRing.trimmed);
 +      Out->printf(PSTR(" ms, dropped "));
 +      SnoopAudioMs(Out, SnoopSidRing.dropped);
@@ -458,6 +490,7 @@ index 0000000..4e3d4ed
 +         const uint32_t Target = (uint32_t)Ms * (SnoopAudioRate / 1000);
 +         isoaudio_ring_init(&SnoopSidRing, SnoopSidRingBuf, SnoopSidRingSize, Target,
 +                            Target + (Target > 960 ? Target : 960));   // trim above target + max(target, 20 ms)
++         SnoopSidCountsReset();
 +         SnoopSidMs = Ms;
 +         SnoopSidFeed = true;
 +         SNOOP_BARRIER();
@@ -626,6 +659,9 @@ index 0000000..4e3d4ed
 +      SnoopOut = NULL;
 +      return;
 +   }
++#ifdef SNOOP_RESID_H
++   SnoopSidFold();
++#endif
 +   snoop_poll(&SnoopState, micros(), ARM_DWT_CYCCNT);
 +#ifdef SNOOP_RESID_H
 +   SnoopSidClockTo(SnoopState.c64_time);
@@ -651,10 +687,10 @@ index 0000000..4e3d4ed
 +#endif
 diff --git a/Source/Teensy/snoop/snoop.c b/Source/Teensy/snoop/snoop.c
 new file mode 100644
-index 0000000..b722004
+index 0000000..bb09183
 --- /dev/null
 +++ b/Source/Teensy/snoop/snoop.c
-@@ -0,0 +1,363 @@
+@@ -0,0 +1,371 @@
 +/* teensyrom-snoop: main-loop side.  See snoop.h and docs/PROTOCOL.md. */
 +#include "snoop.h"
 +#include <string.h>
@@ -833,6 +869,7 @@ index 0000000..b722004
 +   s->flush_us = 2000;
 +   s->status_ms = 1000;
 +   s->probe_worst = 1000;
++   s->audio_low = SNOOP_AUDIO_NONE;
 +}
 +
 +SNOOP_COLD uint32_t snoop_cpu_probe(snoop_t *s, uint32_t (*cyc)(void), uint32_t window_cyc)
@@ -863,7 +900,7 @@ index 0000000..b722004
 +
 +SNOOP_COLD void snoop_status(snoop_t *s)
 +{
-+   uint8_t p[1 + 2 + 10 + 4 + 4 + 2 + 4 + 3 * 4 + 4 + 4 + 2 + 4 + 4 + 4];
++   uint8_t p[1 + 2 + 10 + 4 + 4 + 2 + 4 + 3 * 4 + 4 + 4 + 2 + 4 + 4 + 4 + 2 + 4 + 4];
 +   size_t n = 0;
 +   frame_close(s);
 +   p[n++] = SNOOP_F_STATUS;
@@ -880,8 +917,13 @@ index 0000000..b722004
 +   n += put_u32(p + n, s->probe_stall);
 +   n += put_u32(p + n, s->emu_cyc);
 +   n += put_u32(p + n, s->emu_c64);
++   n += put_u16(p + n, s->audio_low);
++   n += put_u32(p + n, s->audio_under);
++   n += put_u32(p + n, s->audio_trim);
 +   emit(s, p, n);
 +   s->emu_cyc = s->emu_c64 = 0;
++   s->audio_low = SNOOP_AUDIO_NONE;
++   s->audio_under = s->audio_trim = 0;
 +   s->ring_hiwater = 0;
 +   s->probe_cyc = s->probe_free = s->probe_stall = 0;
 +   s->probe_worst = 1000;
@@ -950,6 +992,8 @@ index 0000000..b722004
 +   s->probe_cyc = s->probe_free = s->probe_stall = 0;
 +   s->probe_worst = 1000;
 +   s->emu_cyc = s->emu_c64 = 0;
++   s->audio_low = SNOOP_AUDIO_NONE;
++   s->audio_under = s->audio_trim = 0;
 +   s->last_status_us = now_us;
 +
 +   uint8_t p[1 + 1 + 4 + 4 + 1 + 1 + 4 * SNOOP_MAX_RANGES];
@@ -1020,10 +1064,10 @@ index 0000000..b722004
 +}
 diff --git a/Source/Teensy/snoop/snoop.h b/Source/Teensy/snoop/snoop.h
 new file mode 100644
-index 0000000..d4587a6
+index 0000000..9b22f46
 --- /dev/null
 +++ b/Source/Teensy/snoop/snoop.h
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,244 @@
 +/* teensyrom-snoop: capture C64 bus writes to chosen addresses and stream them.
 + *
 + * Portable C99, also compiled as C++ by the TeensyROM firmware (keep it C++-clean).
@@ -1048,7 +1092,8 @@ index 0000000..d4587a6
 +extern "C" {
 +#endif
 +
-+#define SNOOP_PROTO_VERSION 7
++#define SNOOP_PROTO_VERSION 8
++#define SNOOP_AUDIO_NONE    0xFFFF   /* STATUS audio_low: no packet of the emulator's samples since the last STATUS */
 +
 +#ifndef SNOOP_MAX_RANGES
 +#define SNOOP_MAX_RANGES   16     /* address ranges per start command */
@@ -1209,6 +1254,12 @@ index 0000000..d4587a6
 +   void          *on_write_ctx;
 +   uint32_t       emu_cyc;        /* CPU cycles the consumer took (wall time: interrupts included) */
 +   uint32_t       emu_c64;        /* C64 cycles it emulated */
++   /* The USB audio dongle playing the emulator (version 8), from the glue, since the last STATUS: the fewest
++    * samples buffered when a packet was taken (SNOOP_AUDIO_NONE: none taken), packets short of samples
++    * (underruns), samples skipped to get back to the buffer's target after a stall (trimmed). */
++   uint16_t       audio_low;
++   uint32_t       audio_under;
++   uint32_t       audio_trim;
 +
 +   /* output FIFO */
 +   uint8_t        out[SNOOP_OUT_SIZE];
@@ -1758,10 +1809,10 @@ index 11cde9e..0989efb 100644
 +
 diff --git a/Source/Teensy/src/USBHost_t36/isoaudio.c b/Source/Teensy/src/USBHost_t36/isoaudio.c
 new file mode 100644
-index 0000000..2086ab1
+index 0000000..377e236
 --- /dev/null
 +++ b/Source/Teensy/src/USBHost_t36/isoaudio.c
-@@ -0,0 +1,365 @@
+@@ -0,0 +1,367 @@
 +/* teensyrom-snoop: isochronous audio OUT, the portable half.  See isoaudio.h. */
 +#include "isoaudio.h"
 +
@@ -2085,13 +2136,14 @@ index 0000000..2086ab1
 +   return n;
 +}
 +
-+ISOAUDIO_COLD void isoaudio_ring_packet(isoaudio_ring_t *r, uint8_t *pkt, uint32_t frames)
++ISOAUDIO_COLD int isoaudio_ring_packet(isoaudio_ring_t *r, uint8_t *pkt, uint32_t frames)
 +{
 +   const uint32_t head = r->head;
 +   RING_BARRIER();             /* head before the samples it covers */
 +   uint32_t tail = r->tail;
 +   uint32_t fill = head - tail;
 +   uint32_t n = 0;
++   int under = 0;
 +   if (!r->playing && fill >= r->target) r->playing = 1;
 +   if (r->playing)
 +   {
@@ -2113,7 +2165,7 @@ index 0000000..2086ab1
 +      if (n) r->last = r->buf[(tail + n - 1) & r->mask];
 +      if (n < frames)
 +      {
-+         r->underruns++;
++         under = 1;
 +         r->playing = 0;
 +      }
 +      RING_BARRIER();          /* done reading before the producer may reuse the space */
@@ -2126,13 +2178,14 @@ index 0000000..2086ab1
 +      pkt[1] = pkt[3] = (uint8_t)(h >> 8);
 +      pkt += 4;
 +   }
++   return under;
 +}
 diff --git a/Source/Teensy/src/USBHost_t36/isoaudio.h b/Source/Teensy/src/USBHost_t36/isoaudio.h
 new file mode 100644
-index 0000000..4b894d2
+index 0000000..c4f1188
 --- /dev/null
 +++ b/Source/Teensy/src/USBHost_t36/isoaudio.h
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,186 @@
 +/* teensyrom-snoop: isochronous audio OUT on the USB host port, the portable half (phase 2 step 3,
 + * docs/USB-AUDIO.md).  Copied into the TeensyROM tree as src/USBHost_t36/isoaudio.{h,c} by
 + * tools/make_tr_patch.py; host-tested through ctypes (tests/test_usbaudio.py).
@@ -2286,7 +2339,7 @@ index 0000000..4b894d2
 + *
 + * The consumer waits until `target` samples are buffered, then takes `frames` per packet.  Short of that (the
 + * producer stalled) it plays what is there, holds the last sample for the rest (no click: the SID's output has a
-+ * DC level), counts an underrun and waits for `target` again.  Above `trim_above` (the producer caught up after
++ * DC level), returns 1 (an underrun) and waits for `target` again.  Above `trim_above` (the producer caught up after
 + * a stall, or the consumer was not running) it skips the oldest samples back down to `target`.  A put that does
 + * not fit drops what does not fit (counted). */
 +typedef struct {
@@ -2297,8 +2350,8 @@ index 0000000..4b894d2
 +   uint32_t target, trim_above;
 +   uint8_t  playing;
 +   int16_t  last;              /* the last sample played: held while waiting */
-+   /* counts: consumer (underruns, trimmed, low) and producer (dropped); low is reset by whoever reports it */
-+   volatile uint32_t underruns, trimmed, dropped, low;
++   /* counts: consumer (trimmed, low) and producer (dropped); whoever reports them may reset them */
++   volatile uint32_t trimmed, dropped, low;
 +} isoaudio_ring_t;
 +
 +/* size a power of two; target and trim_above in samples (trim_above > target, both < size) */
@@ -2310,8 +2363,9 @@ index 0000000..4b894d2
 +/* producer: n samples; returns how many fitted (the rest are counted in dropped) */
 +uint32_t isoaudio_ring_put(isoaudio_ring_t *r, const int16_t *s, uint32_t n);
 +
-+/* consumer: `frames` stereo frames, 16-bit little endian, to pkt (4 * frames bytes) */
-+void isoaudio_ring_packet(isoaudio_ring_t *r, uint8_t *pkt, uint32_t frames);
++/* consumer: `frames` stereo frames, 16-bit little endian, to pkt (4 * frames bytes).  Returns 1 when it ran short
++ * of samples (an underrun: the caller decides whether it counts, e.g. not after the producer stopped), else 0. */
++int isoaudio_ring_packet(isoaudio_ring_t *r, uint8_t *pkt, uint32_t frames);
 +
 +#ifdef __cplusplus
 +}

@@ -125,6 +125,13 @@ the emulator to each write's cycle and write the register. That is what `host/si
 4. Connect them: the emulator renders into the siTD ring, samples per frame following phi2. **In 0.9-sn11r
    (host-tested, built with Teensyduino 1.61 here; not yet on hardware):** audio mode 3 (protocol 7) sends reSID's
    samples through a ring to the USB interrupt; see "Step 4 in 0.9-sn11r" and "Trying step 4 on hardware" below.
+   **On hardware (owner, 2026-11-10, sn11r, Ms. Pac-Man, TCP, 159 s, `trsid.py --dongle`): it sounds great**; no phi2
+   interrupt >250 ns late (56877 small ones), no crash, CPU free 43.9%, reSID 28.0% of the time (sn7r 26.0%), USB
+   `frames 590809, errors 0, missed 0`; the buffer's report: `lowest 9.7 ms` since the previous query, but
+   `underruns 3, trimmed 138.2 ms` since mode 3 was set (earlier runs and their ends included: three ~50 ms stalls
+   of the main loop somewhere, probably at a start; not audible). **Step 4 done.** 0.9-sn12r counts them per capture,
+   leaves the drain after a capture out, and puts them in STATUS (protocol 8) so `trsid.py --isr` shows the second a
+   stall happens in; not yet on hardware.
 5. Compare the dongle's line out with `trsid.py`'s rendering of the same stream (both reSID-family, so the SNR
    test in `tests/test_e2e.py` carries over), recorded through a computer's line in.
 
@@ -213,6 +220,8 @@ touch the library).
 3. **The buffer's health**, on port 2112 while trsid runs, a few times:
    `host/trsnoop.py --tcp <ip> --tcp-port 2112 --audio status`. `underruns` should stay 0 and `lowest` above 0;
    `trimmed` may grow once at the start. If underruns grow, try a larger buffer: `trsid.py ... --dongle 25`.
+   From sn12r the `--isr` lines end with `dongle lowest N ms, underruns N, trimmed N ms` for each second, and the
+   summary gives the totals: a stall shows in the second it happened in (compare with the status queries).
 4. **Both at once:** the same without `--no-play`: the Mac plays trsid's reSIDfp, ~100-300 ms behind (the WiFi), the
    dongle reSID, ~20 ms behind the C64. They should sound alike (6581 filters differ a little between the two).
 5. **Stop** trsid: the dongle goes quiet (the last sample held). `--audio off` sets it back to silence.

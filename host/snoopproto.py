@@ -7,7 +7,8 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
-PROTO_VERSION = 7
+PROTO_VERSION = 8
+AUDIO_NONE = 0xFFFF   # STATUS audio_low: no packet of the emulator's samples since the last STATUS
 
 F_HELLO, F_WRITES, F_STATUS, F_BYE = 0x01, 0x02, 0x03, 0x04
 BYE_REASONS = {0: "stopped", 1: "replaced", 2: "channel"}
@@ -129,6 +130,9 @@ class Status:
     probe_stall: int = 0    # longest single interruption seen by the probe, CPU cycles
     emu_cyc: int = 0        # CPU cycles the on-Teensy emulator took since the last STATUS (version 5; 0 = none)
     emu_c64: int = 0        # ...for this many C64 cycles of emulation
+    audio_low: int = AUDIO_NONE  # the dongle playing the emulator (version 8), since the last STATUS: fewest samples
+    audio_under: int = 0         # buffered when a packet was taken (AUDIO_NONE: none), packets short of samples,
+    audio_trim: int = 0          # and samples skipped back to the buffer's target after a stall
 
     @property
     def cpu_free(self):
@@ -142,6 +146,14 @@ class Status:
             return ""
         secs = self.emu_c64 / phi2_hz
         return f"reSID {self.emu_cyc / cpu_hz / secs * 100:4.1f}% of the time"
+
+    def audio_text(self, rate: int = 48000) -> str:
+        """The dongle's buffer in words (version 8, the emulator on the dongle), or '' when it did not play."""
+        if self.audio_low == AUDIO_NONE and not self.audio_under and not self.audio_trim:
+            return ""
+        low = "-" if self.audio_low == AUDIO_NONE else f"{self.audio_low * 1000 / rate:4.1f}"
+        return (f"dongle lowest {low} ms, underruns {self.audio_under}, "
+                f"trimmed {self.audio_trim * 1000 / rate:.1f} ms")
 
     def probe_text(self, cpu_hz: int = 600_000_000) -> str:
         """The CPU probe in words, or '' when it did not run (firmware before 0.9-sn6)."""
@@ -192,16 +204,18 @@ def parse_payload(p: bytes):
         time, i = _varint(p, 3)
         dropped, out_dropped, hiw, writes = struct.unpack_from("<IIHI", p, i)
         i += 14
-        late, probe, emu = (0, 0, 0), (0, 0, 1000, 0), (0, 0)
-        if len(p) in (i + 12, i + 26, i + 34):     # version 3: the late counters
+        late, probe, emu, audio = (0, 0, 0), (0, 0, 1000, 0), (0, 0), (AUDIO_NONE, 0, 0)
+        if len(p) in (i + 12, i + 26, i + 34, i + 44):     # version 3: the late counters
             late = struct.unpack_from("<III", p, i)
             if len(p) >= i + 26:                   # version 4: the CPU probe
                 probe = struct.unpack_from("<IIHI", p, i + 12)
-            if len(p) == i + 34:                   # version 5: the emulator's cost
+            if len(p) >= i + 34:                   # version 5: the emulator's cost
                 emu = struct.unpack_from("<II", p, i + 26)
+            if len(p) == i + 44:                   # version 8: the dongle's buffer
+                audio = struct.unpack_from("<HII", p, i + 34)
         elif len(p) != i:
             raise ValueError("STATUS length")
-        return Status(next_seq, time, dropped, out_dropped, hiw, writes, *late, *probe, *emu)
+        return Status(next_seq, time, dropped, out_dropped, hiw, writes, *late, *probe, *emu, *audio)
     if t == F_BYE:
         if len(p) != 2:
             raise ValueError("BYE length")
@@ -348,11 +362,12 @@ def writes_payload(seq: int, blocks) -> bytes:
 
 
 def status_payload(next_seq, time, dropped=0, out_dropped=0, hiwater=0, writes=0, late=(0, 0, 0),
-                   probe=(0, 0, 1000, 0), emu=(0, 0)) -> bytes:
-    """probe: (probe_cyc, probe_free, probe_worst, probe_stall); emu: (emu_cyc, emu_c64)."""
+                   probe=(0, 0, 1000, 0), emu=(0, 0), audio=(AUDIO_NONE, 0, 0)) -> bytes:
+    """probe: (probe_cyc, probe_free, probe_worst, probe_stall); emu: (emu_cyc, emu_c64);
+    audio: (audio_low, audio_under, audio_trim)."""
     return (struct.pack("<BH", F_STATUS, next_seq & 0xFFFF) + put_varint(time)
             + struct.pack("<IIHI", dropped, out_dropped, hiwater, writes) + struct.pack("<III", *late)
-            + struct.pack("<IIHI", *probe) + struct.pack("<II", *emu))
+            + struct.pack("<IIHI", *probe) + struct.pack("<II", *emu) + struct.pack("<HII", *audio))
 
 
 def bye_payload(reason=0) -> bytes:

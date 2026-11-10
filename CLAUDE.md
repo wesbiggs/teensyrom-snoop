@@ -104,6 +104,11 @@ protects updates made from sn10 on). On hardware (owner): sn10 updated to itself
 0.9-sn11r (phase 2 step 4, protocol 7): audio mode `64 53 03 03 ms` puts reSID's samples in `SnoopSidRing` (isoaudio ring,
 8192 samples in RAM2, target `ms` (10), trim above target + max(target, 20 ms), hold the last sample on underrun); the
 USB interrupt takes 48 a frame. Plays only while a capture runs (`trsid.py --dongle`). Host-tested (packets equal reSID's
-output); the r image built locally with Teensyduino 1.61 (RAM1 free 69116, isrPHI2 saves unchanged). Not yet on hardware.
+output); the r image built locally with Teensyduino 1.61 (RAM1 free 69116, isrPHI2 saves unchanged). **On hardware
+(owner, 2026-11-10, Ms. Pac-Man, 159 s): sounds great**, no late phi2, no crash, reSID 28%, USB errors/missed 0;
+`underruns 3, trimmed 138 ms` cumulative since mode 3 (several runs; ~50 ms loop stalls, not audible). Step 4 done.
+0.9-sn12r (protocol 8): the ring's counts per capture (the drain after a stop is not an underrun:
+`isoaudio_ring_packet` returns 1 on underrun, the glue counts it while `SnoopState.running`), folded into STATUS
+`audio_low/under/trim` each loop pass (`SnoopSidFold`); `trsid.py --isr` prints them each second. Not yet on hardware.
 `tools/armcheck` unpacks under this repo's `build/`: the tree needs a repository of its own or `git apply` skips every
 file silently (fixed in sn3; it now fails when the patches change nothing). Its results before that were for stock trees.

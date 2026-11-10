@@ -547,20 +547,41 @@ int main()
       // the dongle got the same samples, in order, from the first one, in whole packets
       CHECK(Played.size() >= Got.size() - 480 - 48 && Played.size() % 48 == 0);
       CHECK(std::equal(Played.begin(), Played.end(), Got.begin()));
-      CHECK(SnoopSidRing.underruns == 0 && SnoopSidRing.trimmed == 0 && SnoopSidRing.dropped == 0);
+      CHECK(SnoopSidUnderruns == 0 && SnoopSidRing.trimmed == 0 && SnoopSidRing.dropped == 0);
       Stream Au;
       Command(&Au, {0x64, 0x53, 3, 2});
       const std::string t = Text(Au);
       CHECK(t.find("Snoop audio: SID (reSID 6581), 10 ms buffer, no capture running; 0020:0B21") != std::string::npos);
       CHECK(t.find("; SID buffered ") != std::string::npos && t.find(" ms, underruns 0, trimmed 0.0 ms, dropped 0.0 ms\n") != std::string::npos);
-      // the rest plays out, then the last sample is held (no click), counted as one underrun
+      // the rest plays out, then the last sample is held (no click); with no capture running that is no underrun
       while (isoaudio_ring_fill(&SnoopSidRing) >= 48) SnoopDongle.Frame();
       std::vector<int16_t> Tail = Samples(SnoopDongle.Frame(), 0);
-      CHECK(Tail.back() == Got.back() && SnoopSidRing.underruns == 1);
+      CHECK(Tail.back() == Got.back() && SnoopSidUnderruns == 0);
       CHECK(Samples(SnoopDongle.Frame(), 0) == std::vector<int16_t>(48, Got.back()));
+      // a second capture: the counts start again; a packet that finds the buffer short during it is an underrun,
+      // and the next pass puts it, the lowest fill and the trimmed samples into STATUS (version 8)
+      SnoopSidRing.trimmed = 77;
+      SnoopSidUnderruns = 5;
+      Command(&Au, {0x64, 0x53, 1, 1, 0x00, 0xD4, 0x1C, 0xD4, 0, 0});
+      CHECK(SnoopSidUnderruns == 0 && SnoopSidRing.trimmed == 0 && SnoopState.audio_low == SNOOP_AUDIO_NONE);
+      Cycle(0xD418, false, 0x0F);
+      ARM_DWT_CYCCNT += 609u * 30000u;                  // ~29 ms of C64 time
+      Loop();
+      CHECK(isoaudio_ring_fill(&SnoopSidRing) > 1440);  // above target + 20 ms: the next packet trims
+      SnoopDongle.Frame();
+      const uint32_t Trimmed = SnoopSidRing.trimmed;
+      CHECK(Trimmed > 0 && isoaudio_ring_fill(&SnoopSidRing) == 480 - 48);
+      for (int k = 0; k < 10; k++) SnoopDongle.Frame(); // 9 take the 432 left, the 10th is short
+      CHECK(SnoopSidUnderruns == 1);
+      Loop();
+      CHECK(SnoopState.audio_under == 1 && SnoopState.audio_trim == Trimmed && SnoopState.audio_low == 0);
+      Command(&Au, {0x64, 0x53, 2});                      // STATUS now: sent, then cleared
+      CHECK(SnoopState.audio_under == 0 && SnoopState.audio_trim == 0 && SnoopState.audio_low == SNOOP_AUDIO_NONE);
+      Command(&Au, {0x64, 0x53, 0});
+      Dump("build/fw_sid_dongle.bin", Au);
       // a new buffer size: the ring starts again; mode 0 stops the feed
       Command(&Au, {0x64, 0x53, 3, 3, 200});              // clamped to 60 ms
-      CHECK(SnoopSidMs == 60 && SnoopSidRing.target == 2880 && SnoopSidRing.trim_above == 5760 && SnoopSidRing.underruns == 0);
+      CHECK(SnoopSidMs == 60 && SnoopSidRing.target == 2880 && SnoopSidRing.trim_above == 5760 && SnoopSidUnderruns == 0);
       Command(&Au, {0x64, 0x53, 3, 0});
       CHECK(SnoopAudioSource == NULL && !SnoopSidFeed);
       SnoopDongle.unplug();

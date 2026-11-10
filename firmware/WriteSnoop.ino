@@ -90,6 +90,19 @@ void (*SnoopSidSink)(const short *Samples, int n) = NULL;   // a copy of the sam
 DMAMEM int16_t SnoopSidRingBuf[SnoopSidRingSize];
 isoaudio_ring_t SnoopSidRing;
 bool SnoopSidFeed = false;                   // audio mode 3: the samples go to the ring
+// The ring's counts for this capture (0.9-sn12): underruns while a capture runs (the drain after it is not
+// one), counted by the USB interrupt; the lowest fill since the last audio report; what STATUS already has.
+volatile uint32_t SnoopSidUnderruns = 0;
+uint32_t SnoopSidLowReport = 0xFFFFFFFFu;
+uint32_t SnoopSidSeenUnder = 0, SnoopSidSeenTrim = 0;
+
+FLASHMEM void SnoopSidCountsReset()
+{
+   SnoopSidUnderruns = 0;
+   SnoopSidRing.trimmed = SnoopSidRing.dropped = 0;
+   SnoopSidRing.low = SnoopSidLowReport = 0xFFFFFFFFu;
+   SnoopSidSeenUnder = SnoopSidSeenTrim = 0;
+}
 
 FLASHMEM void SnoopSidClockTo(uint64_t Time)
 {
@@ -127,6 +140,7 @@ FLASHMEM void SnoopSidStart()
    SnoopSid->set_sampling_parameters(SnoopPhi2Hz(), reSID::SAMPLE_FAST, SnoopSidRate);
    SnoopSid->reset();
    SnoopSidAt = 0;
+   SnoopSidCountsReset();   // the dongle's counts are per capture
    SnoopState.on_write = SnoopSidWrite;
    SnoopState.on_write_ctx = NULL;
 }
@@ -193,7 +207,24 @@ FLASHMEM void SnoopToneSource(uint8_t *Packet, uint32_t Frames)
 uint8_t SnoopSidMs = SnoopSidDefaultMs;
 FLASHMEM void SnoopSidSource(uint8_t *Packet, uint32_t Frames)
 {
-   isoaudio_ring_packet(&SnoopSidRing, Packet, Frames);
+   if (isoaudio_ring_packet(&SnoopSidRing, Packet, Frames) && SnoopState.running) SnoopSidUnderruns++;
+}
+
+// From SnoopService, before snoop_poll (which may send STATUS): what the dongle's buffer did since the last pass,
+// into the STATUS fields (version 8).  Taking the lowest fill and starting it afresh can lose one packet's value
+// if the interrupt comes in between: harmless for a minimum taken every pass.
+FLASHMEM void SnoopSidFold()
+{
+   if (SnoopAudioSource != SnoopSidSource) return;
+   const uint32_t Low = SnoopSidRing.low;
+   SnoopSidRing.low = 0xFFFFFFFFu;
+   if (Low < SnoopSidLowReport) SnoopSidLowReport = Low;
+   if (Low < SnoopState.audio_low) SnoopState.audio_low = (uint16_t)Low;
+   const uint32_t U = SnoopSidUnderruns, T = SnoopSidRing.trimmed;
+   SnoopState.audio_under += U - SnoopSidSeenUnder;
+   SnoopState.audio_trim += T - SnoopSidSeenTrim;
+   SnoopSidSeenUnder = U;
+   SnoopSidSeenTrim = T;
 }
 #endif
 
@@ -274,15 +305,16 @@ FLASHMEM void SnoopAudioReport(Stream *Out)
    if (i.failed_step) Out->printf(PSTR("; %s failed"), SnoopAudioStep(i.failed_step));
 #ifdef SNOOP_RESID_H
    if (SnoopAudioSource == SnoopSidSource)
-   {  // the ring: buffered now, the lowest since the last report (at a packet), underruns, trimmed, dropped
-      const uint32_t Low = SnoopSidRing.low;
-      SnoopSidRing.low = 0xFFFFFFFFu;
+   {  // the ring: buffered now, the lowest since the last report (at a packet); this capture's underruns, trimmed, dropped
+      const uint32_t RingLow = SnoopSidRing.low;
+      const uint32_t Low = RingLow < SnoopSidLowReport ? RingLow : SnoopSidLowReport;
+      SnoopSidRing.low = SnoopSidLowReport = 0xFFFFFFFFu;
       Out->printf(PSTR("; SID buffered "));
       SnoopAudioMs(Out, isoaudio_ring_fill(&SnoopSidRing));
       Out->printf(PSTR(" ms, lowest "));
       if (Low == 0xFFFFFFFFu) Out->printf(PSTR("-"));
       else SnoopAudioMs(Out, Low);
-      Out->printf(PSTR(" ms, underruns %lu, trimmed "), (unsigned long)SnoopSidRing.underruns);
+      Out->printf(PSTR(" ms, underruns %lu, trimmed "), (unsigned long)SnoopSidUnderruns);
       SnoopAudioMs(Out, SnoopSidRing.trimmed);
       Out->printf(PSTR(" ms, dropped "));
       SnoopAudioMs(Out, SnoopSidRing.dropped);
@@ -325,6 +357,7 @@ FLASHMEM void SnoopAudioCommand()
          const uint32_t Target = (uint32_t)Ms * (SnoopAudioRate / 1000);
          isoaudio_ring_init(&SnoopSidRing, SnoopSidRingBuf, SnoopSidRingSize, Target,
                             Target + (Target > 960 ? Target : 960));   // trim above target + max(target, 20 ms)
+         SnoopSidCountsReset();
          SnoopSidMs = Ms;
          SnoopSidFeed = true;
          SNOOP_BARRIER();
@@ -493,6 +526,9 @@ FLASHMEM void SnoopService()
       SnoopOut = NULL;
       return;
    }
+#ifdef SNOOP_RESID_H
+   SnoopSidFold();
+#endif
    snoop_poll(&SnoopState, micros(), ARM_DWT_CYCCNT);
 #ifdef SNOOP_RESID_H
    SnoopSidClockTo(SnoopState.c64_time);

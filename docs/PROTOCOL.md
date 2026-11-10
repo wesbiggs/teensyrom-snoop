@@ -1,4 +1,4 @@
-# teensyrom-snoop protocol (version 7)
+# teensyrom-snoop protocol (version 8)
 
 All multi-byte numbers are little-endian unless marked otherwise. `varint` is unsigned LEB128
 (7 bits per byte, low group first, high bit = more).
@@ -56,10 +56,12 @@ Snoop audio: silence; no USB audio device
   fewest there were when a packet was taken since the last report (`lowest`, `-` before any; each report restarts
   it), `underruns` (packets that found fewer than 48: the rest held the last sample, then the buffer filled to its
   target again before playing on), `trimmed` (samples skipped when the buffer held more than the target + max(target,
-  20 ms), after the main loop stalled), `dropped` (samples that did not fit the 170 ms ring). Counted since mode 3
-  was set (setting it again with another `ms` starts over).
+  20 ms), after the main loop stalled), `dropped` (samples that did not fit the 170 ms ring). From 0.9-sn12 these
+  three count from the start of the current (or last) capture, and the drain after a capture stops is not an
+  underrun (in sn11 they counted from when mode 3 was set, every capture's end included).
 
 The protocol on the stream is unchanged in versions 6 and 7: only the command is new (HELLO carries the version).
+Version 8 adds three fields to STATUS (below).
 
 ## Stream (TeensyROM to host)
 
@@ -111,11 +113,11 @@ STATUS/BYE, so latency is a few ms.
 
 ### STATUS `03`
 
-`03 next_seq:u16 time:varint dropped:u32 out_dropped:u32 ring_hiwater:u16 writes:u32 late:u32 late250:u32 late1000:u32 probe_cyc:u32 probe_free:u32 probe_worst:u16 probe_stall:u32 emu_cyc:u32 emu_c64:u32`
+`03 next_seq:u16 time:varint dropped:u32 out_dropped:u32 ring_hiwater:u16 writes:u32 late:u32 late250:u32 late1000:u32 probe_cyc:u32 probe_free:u32 probe_worst:u16 probe_stall:u32 emu_cyc:u32 emu_c64:u32 audio_low:u16 audio_under:u32 audio_trim:u32`
 
 The three `late` counters are new in version 3, the four `probe` fields in version 4, the two `emu` fields in
-version 5. A version 2 STATUS ends after `writes`, a version 3 one after `late1000`, a version 4 one after
-`probe_stall`, and the decoder accepts all four.
+version 5, the three `audio` fields in version 8. A version 2 STATUS ends after `writes`, a version 3 one after
+`late1000`, a version 4 one after `probe_stall`, a version 5-7 one after `emu_c64`, and the decoder accepts all five.
 
 Once a second, on the status command, and before BYE.
 
@@ -143,6 +145,11 @@ Once a second, on the status command, and before BYE.
   came in meanwhile included), to emulate `emu_c64` C64 cycles. `emu_cyc / cpu_hz` over `emu_c64 / phi2_hz` is the
   share of the time it takes: it keeps up while that stays well below 1. Both are 0 in a build without reSID.
   From version 7 the emulator's output can go to the USB audio dongle (`64 53 03 03 ms`, phase 2 step 4).
+* `audio_low`, `audio_under`, `audio_trim` (version 8, firmware 0.9-sn12r), **since the last STATUS**, while the dongle
+  plays the emulator (audio mode 3): the fewest samples (48 kHz) waiting when the USB interrupt took a packet
+  (`FFFF`: no packet taken, e.g. another audio mode), the packets that found fewer than 48 (underruns), and the
+  samples skipped to get back to the buffer's target after a stall (trimmed). `FFFF`, 0, 0 without reSID.
+  `trsid.py --isr` prints them each second, so a stall shows in the second it happened.
 
 ### BYE `04`
 

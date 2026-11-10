@@ -321,13 +321,14 @@ ISOAUDIO_COLD uint32_t isoaudio_ring_put(isoaudio_ring_t *r, const int16_t *s, u
    return n;
 }
 
-ISOAUDIO_COLD void isoaudio_ring_packet(isoaudio_ring_t *r, uint8_t *pkt, uint32_t frames)
+ISOAUDIO_COLD int isoaudio_ring_packet(isoaudio_ring_t *r, uint8_t *pkt, uint32_t frames)
 {
    const uint32_t head = r->head;
    RING_BARRIER();             /* head before the samples it covers */
    uint32_t tail = r->tail;
    uint32_t fill = head - tail;
    uint32_t n = 0;
+   int under = 0;
    if (!r->playing && fill >= r->target) r->playing = 1;
    if (r->playing)
    {
@@ -349,7 +350,7 @@ ISOAUDIO_COLD void isoaudio_ring_packet(isoaudio_ring_t *r, uint8_t *pkt, uint32
       if (n) r->last = r->buf[(tail + n - 1) & r->mask];
       if (n < frames)
       {
-         r->underruns++;
+         under = 1;
          r->playing = 0;
       }
       RING_BARRIER();          /* done reading before the producer may reuse the space */
@@ -362,4 +363,5 @@ ISOAUDIO_COLD void isoaudio_ring_packet(isoaudio_ring_t *r, uint8_t *pkt, uint32
       pkt[1] = pkt[3] = (uint8_t)(h >> 8);
       pkt += 4;
    }
+   return under;
 }

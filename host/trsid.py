@@ -147,6 +147,7 @@ def main():
     last_status = None
     cpu_hz, probe_cyc, probe_free = 600_000_000, 0, 0
     emu_cyc, emu_c64 = 0, 0     # the on-Teensy emulator's cost (firmware built with reSID)
+    dongle = [sp.AUDIO_NONE, 0, 0, 0]   # its dongle's buffer (STATUS v8): lowest, underruns, trimmed, seconds with underruns
     shown = [0, 0]              # drops and repeats at the last --isr line
     marks = []                  # (arrival, C64 time) of each STATUS: the TeensyROM's clock against this computer's
     try:
@@ -162,13 +163,18 @@ def main():
                     probe_free += f.probe_free
                     emu_cyc += f.emu_cyc
                     emu_c64 += f.emu_c64
+                    dongle[0] = min(dongle[0], f.audio_low)
+                    dongle[1] += f.audio_under
+                    dongle[2] += f.audio_trim
+                    dongle[3] += 1 if f.audio_under else 0
                     if a.isr and last_status is not None:
                         secs = max((f.time - last_status.time) / player.r.phi2, 1e-3)
                         print(f"# latency {player.latency * 1000:4.0f} ms  FIFO {player.fifo_len * 1000 / a.rate:4.0f} ms  "
                               f"dropped {player.dropped - shown[0]:4d} repeated {player.repeated - shown[1]:4d}  "
                               f"late bus interrupts/s: {(f.late - last_status.late) / secs:7.1f}  "
                               f">250ns: {(f.late250 - last_status.late250) / secs:6.1f}  "
-                              f">1us: {(f.late1000 - last_status.late1000) / secs:6.1f}  {f.probe_text(cpu_hz)}  {f.emu_text(cpu_hz, player.r.phi2)}".rstrip(), flush=True)
+                              f">1us: {(f.late1000 - last_status.late1000) / secs:6.1f}  {f.probe_text(cpu_hz)}  {f.emu_text(cpu_hz, player.r.phi2)}  "
+                              f"{f.audio_text()}".rstrip(), flush=True)
                         shown[:] = [player.dropped, player.repeated]
                     last_status = f
                 if isinstance(f, sp.Bye):
@@ -201,6 +207,10 @@ def main():
     if emu_c64:
         print(f"# reSID on the TeensyROM (6581, 48 kHz, fast sampling), average: {emu_cyc / cpu_hz / (emu_c64 / player.r.phi2) * 100:.1f}% "
               f"of the time (wall clock: interrupts included; at 100% it no longer keeps up) over {emu_c64 / player.r.phi2:.0f} s")
+    if dongle[0] != sp.AUDIO_NONE or dongle[1] or dongle[2]:
+        low = "-" if dongle[0] == sp.AUDIO_NONE else f"{dongle[0] / 48:.1f} ms"
+        print(f"# the TeensyROM's dongle: lowest buffer {low}, underruns {dongle[1]} (in {dongle[3]} s), "
+              f"trimmed {dongle[2] / 48:.1f} ms")
     # The player renders C64 time at the nominal phi2 and the sound card takes `rate` a second; a steady stream
     # of drops (or repeats) means one of the two clocks is off.  Least arrival delay at each end, over >= 10 s.
     if len(marks) >= 12:

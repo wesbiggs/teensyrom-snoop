@@ -72,3 +72,9 @@ int sim_cons_n(void) { return cons_n; }
 uint64_t sim_cons_t(int i) { return cons_t[i]; }
 int sim_cons_ad(int i) { return cons_a[i] << 8 | cons_d[i]; }
 void sim_emu(uint32_t cyc, uint32_t c64) { st.emu_cyc += cyc; st.emu_c64 += c64; }
+void sim_audio(uint16_t low, uint32_t under, uint32_t trim)
+{
+   if (low < st.audio_low) st.audio_low = low;
+   st.audio_under += under;
+   st.audio_trim += trim;
+}

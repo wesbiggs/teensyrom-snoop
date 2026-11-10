@@ -151,7 +151,7 @@ void isoaudio_tone_packet(isoaudio_tone_t *t, uint8_t *pkt, uint32_t frames);
  *
  * The consumer waits until `target` samples are buffered, then takes `frames` per packet.  Short of that (the
  * producer stalled) it plays what is there, holds the last sample for the rest (no click: the SID's output has a
- * DC level), counts an underrun and waits for `target` again.  Above `trim_above` (the producer caught up after
+ * DC level), returns 1 (an underrun) and waits for `target` again.  Above `trim_above` (the producer caught up after
  * a stall, or the consumer was not running) it skips the oldest samples back down to `target`.  A put that does
  * not fit drops what does not fit (counted). */
 typedef struct {
@@ -162,8 +162,8 @@ typedef struct {
    uint32_t target, trim_above;
    uint8_t  playing;
    int16_t  last;              /* the last sample played: held while waiting */
-   /* counts: consumer (underruns, trimmed, low) and producer (dropped); low is reset by whoever reports it */
-   volatile uint32_t underruns, trimmed, dropped, low;
+   /* counts: consumer (trimmed, low) and producer (dropped); whoever reports them may reset them */
+   volatile uint32_t trimmed, dropped, low;
 } isoaudio_ring_t;
 
 /* size a power of two; target and trim_above in samples (trim_above > target, both < size) */
@@ -175,8 +175,9 @@ uint32_t isoaudio_ring_fill(const isoaudio_ring_t *r);
 /* producer: n samples; returns how many fitted (the rest are counted in dropped) */
 uint32_t isoaudio_ring_put(isoaudio_ring_t *r, const int16_t *s, uint32_t n);
 
-/* consumer: `frames` stereo frames, 16-bit little endian, to pkt (4 * frames bytes) */
-void isoaudio_ring_packet(isoaudio_ring_t *r, uint8_t *pkt, uint32_t frames);
+/* consumer: `frames` stereo frames, 16-bit little endian, to pkt (4 * frames bytes).  Returns 1 when it ran short
+ * of samples (an underrun: the caller decides whether it counts, e.g. not after the producer stopped), else 0. */
+int isoaudio_ring_packet(isoaudio_ring_t *r, uint8_t *pkt, uint32_t frames);
 
 #ifdef __cplusplus
 }

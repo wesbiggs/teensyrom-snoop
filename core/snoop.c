@@ -176,6 +176,7 @@ SNOOP_COLD void snoop_init(snoop_t *s, snoop_hot_t *hot)
    s->flush_us = 2000;
    s->status_ms = 1000;
    s->probe_worst = 1000;
+   s->audio_low = SNOOP_AUDIO_NONE;
 }
 
 SNOOP_COLD uint32_t snoop_cpu_probe(snoop_t *s, uint32_t (*cyc)(void), uint32_t window_cyc)
@@ -206,7 +207,7 @@ SNOOP_COLD uint32_t snoop_cpu_probe(snoop_t *s, uint32_t (*cyc)(void), uint32_t 
 
 SNOOP_COLD void snoop_status(snoop_t *s)
 {
-   uint8_t p[1 + 2 + 10 + 4 + 4 + 2 + 4 + 3 * 4 + 4 + 4 + 2 + 4 + 4 + 4];
+   uint8_t p[1 + 2 + 10 + 4 + 4 + 2 + 4 + 3 * 4 + 4 + 4 + 2 + 4 + 4 + 4 + 2 + 4 + 4];
    size_t n = 0;
    frame_close(s);
    p[n++] = SNOOP_F_STATUS;
@@ -223,8 +224,13 @@ SNOOP_COLD void snoop_status(snoop_t *s)
    n += put_u32(p + n, s->probe_stall);
    n += put_u32(p + n, s->emu_cyc);
    n += put_u32(p + n, s->emu_c64);
+   n += put_u16(p + n, s->audio_low);
+   n += put_u32(p + n, s->audio_under);
+   n += put_u32(p + n, s->audio_trim);
    emit(s, p, n);
    s->emu_cyc = s->emu_c64 = 0;
+   s->audio_low = SNOOP_AUDIO_NONE;
+   s->audio_under = s->audio_trim = 0;
    s->ring_hiwater = 0;
    s->probe_cyc = s->probe_free = s->probe_stall = 0;
    s->probe_worst = 1000;
@@ -293,6 +299,8 @@ SNOOP_COLD int snoop_start(snoop_t *s, const snoop_range_t *ranges, uint8_t nran
    s->probe_cyc = s->probe_free = s->probe_stall = 0;
    s->probe_worst = 1000;
    s->emu_cyc = s->emu_c64 = 0;
+   s->audio_low = SNOOP_AUDIO_NONE;
+   s->audio_under = s->audio_trim = 0;
    s->last_status_us = now_us;
 
    uint8_t p[1 + 1 + 4 + 4 + 1 + 1 + 4 * SNOOP_MAX_RANGES];

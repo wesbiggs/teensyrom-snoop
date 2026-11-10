@@ -119,6 +119,19 @@ class SidEmulator(unittest.TestCase):
         busy = [st for st in sts if st.emu_c64]
         self.assertTrue(busy[0].emu_text(600_000_000, sp.PHI2_PAL).startswith("reSID"))
 
+    def test_status_reports_the_dongle_buffer(self):
+        if not os.path.exists(os.path.join(ROOT, "build", "fw_sid_dongle.bin")):
+            self.skipTest("make resid test-sid")
+        dec, fr, data = frames("fw_sid_dongle.bin")
+        h = [f for f in fr if isinstance(f, sp.Hello)]
+        self.assertEqual(h[0].version, 8)
+        sts = [f for f in fr if isinstance(f, sp.Status)]
+        self.assertGreaterEqual(len(sts), 2)                               # the status command's, then the stop's
+        self.assertEqual((sts[0].audio_low, sts[0].audio_under), (0, 1))    # the short packet, during the capture
+        self.assertGreater(sts[0].audio_trim, 0)
+        self.assertTrue(sts[0].audio_text().startswith("dongle lowest  0.0 ms, underruns 1, trimmed "))
+        self.assertEqual((sts[-1].audio_low, sts[-1].audio_under, sts[-1].audio_trim), (sp.AUDIO_NONE, 0, 0))
+
 
 if __name__ == "__main__":
     unittest.main()
