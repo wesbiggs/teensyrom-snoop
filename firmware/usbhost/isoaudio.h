@@ -143,6 +143,41 @@ int16_t isoaudio_tone_next(isoaudio_tone_t *t);
  * Packets written one after another continue the phase exactly. */
 void isoaudio_tone_packet(isoaudio_tone_t *t, uint8_t *pkt, uint32_t frames);
 
+/* ---- the sample ring: an emulator in the main loop produces, the USB interrupt consumes ------------------ */
+
+/* One producer (the main loop: put) and one consumer (the USBHS interrupt: packet), no locks: head is written
+ * only by the producer, tail only by the consumer, each after its samples (a compiler barrier: one core).
+ * Mono 16-bit samples in a power-of-two buffer the caller owns; packets are stereo with both channels equal.
+ *
+ * The consumer waits until `target` samples are buffered, then takes `frames` per packet.  Short of that (the
+ * producer stalled) it plays what is there, holds the last sample for the rest (no click: the SID's output has a
+ * DC level), counts an underrun and waits for `target` again.  Above `trim_above` (the producer caught up after
+ * a stall, or the consumer was not running) it skips the oldest samples back down to `target`.  A put that does
+ * not fit drops what does not fit (counted). */
+typedef struct {
+   int16_t *buf;
+   uint32_t mask;              /* size - 1 */
+   volatile uint32_t head;     /* samples put (producer) */
+   volatile uint32_t tail;     /* samples taken or skipped (consumer) */
+   uint32_t target, trim_above;
+   uint8_t  playing;
+   int16_t  last;              /* the last sample played: held while waiting */
+   /* counts: consumer (underruns, trimmed, low) and producer (dropped); low is reset by whoever reports it */
+   volatile uint32_t underruns, trimmed, dropped, low;
+} isoaudio_ring_t;
+
+/* size a power of two; target and trim_above in samples (trim_above > target, both < size) */
+void isoaudio_ring_init(isoaudio_ring_t *r, int16_t *buf, uint32_t size, uint32_t target, uint32_t trim_above);
+
+/* samples buffered (either side) */
+uint32_t isoaudio_ring_fill(const isoaudio_ring_t *r);
+
+/* producer: n samples; returns how many fitted (the rest are counted in dropped) */
+uint32_t isoaudio_ring_put(isoaudio_ring_t *r, const int16_t *s, uint32_t n);
+
+/* consumer: `frames` stereo frames, 16-bit little endian, to pkt (4 * frames bytes) */
+void isoaudio_ring_packet(isoaudio_ring_t *r, uint8_t *pkt, uint32_t frames);
+
 #ifdef __cplusplus
 }
 #endif

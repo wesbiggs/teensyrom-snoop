@@ -5,6 +5,7 @@
   trsnoop.py --tcp 192.168.1.50 --range D400-D41C --range D500-D51C --raw sid.snoop
   trsnoop.py --replay sid.snoop
   trsnoop.py --tcp 192.168.1.50 --tone on       # the 1 kHz test tone on the USB audio dongle (0.9-sn8+)
+  trsnoop.py --tcp 192.168.1.50 --audio sid     # the dongle plays the TeensyROM's own reSID (0.9-sn11r)
 
 Ranges are hex, inclusive: D418, D400-D41C, D400+29.  Ctrl-C sends the stop command.
 --raw writes the channel bytes as received (replay them with --replay).
@@ -85,9 +86,13 @@ def read_line(ch, rest: bytes, seconds: float = 2.0) -> str:
     return buf.split(b"\n", 1)[0].decode("ascii", "replace").strip()
 
 
-def audio(ch, mode: str) -> bool:
-    """--tone on|off|status: the USB audio dongle on the TeensyROM's host port"""
-    ch.write(sp.audio_command({"off": sp.AUDIO_SILENCE, "on": sp.AUDIO_TONE, "status": sp.AUDIO_REPORT}[mode]))
+AUDIO_MODES = {"off": sp.AUDIO_SILENCE, "on": sp.AUDIO_TONE, "tone": sp.AUDIO_TONE, "status": sp.AUDIO_REPORT,
+               "sid": sp.AUDIO_SID}
+
+
+def audio(ch, mode: str, ms: int = 0) -> bool:
+    """--tone on|off|status, --audio off|tone|sid|status: the USB audio dongle on the TeensyROM's host port"""
+    ch.write(sp.audio_command(AUDIO_MODES[mode], ms))
     ok, rest = wait_ack(ch)
     if ok:
         print(read_line(ch, rest) or "(no report: firmware before 0.9-sn8?)")
@@ -166,7 +171,13 @@ def main():
     ap.add_argument("--tone", choices=("on", "off", "status"),
                     help="the 1 kHz test tone on a USB audio dongle in the TeensyROM's host port (firmware 0.9-sn8+), "
                     "then print what the dongle does; alone, or before a capture with --range")
+    ap.add_argument("--audio", choices=("off", "tone", "sid", "status"),
+                    help="what the USB audio dongle plays: as --tone, or sid: the TeensyROM's own SID emulator "
+                    "(an image with reSID, 0.9-sn11r+) while a capture of $D400 runs (trsid.py --dongle starts both)")
+    ap.add_argument("--audio-ms", type=int, default=0, help="--audio sid: the dongle's buffer, ms (0 = 10, 2-60)")
     a = ap.parse_args()
+    if a.tone and a.audio:
+        ap.error("--tone or --audio, not both")
 
     if a.replay:
         replay(a.replay, a.quiet)
@@ -179,8 +190,8 @@ def main():
         ch.close()
         sys.exit(0 if ok else 1)
 
-    if a.tone:
-        ok = audio(ch, a.tone)
+    if a.tone or a.audio:
+        ok = audio(ch, a.tone or a.audio, a.audio_ms)
         if not ok or not a.range:
             ch.close()
             sys.exit(0 if ok else 1)

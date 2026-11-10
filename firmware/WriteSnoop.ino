@@ -64,8 +64,9 @@ FLASHMEM uint32_t SnoopPhi2Hz()
 // The SID emulator (0.9-sn7, phase 2 step 2, docs/USB-AUDIO.md): only in a tree that has reSID in src/reSID/
 // (tools/fetch_resid.py; GPL-2.0-or-later, so such an image is GPL as a whole).  One 6581 at 48 kHz, fast
 // sampling, clocked to each captured write to $D400-$D41F on its exact C64 cycle and then to "now" on every
-// loop pass.  The output goes nowhere yet: this step measures the cost, which STATUS (protocol 5) reports as
-// emu_cyc (CPU cycles taken, interrupts included) for emu_c64 (C64 cycles emulated).
+// loop pass.  STATUS (protocol 5) reports its cost as emu_cyc (CPU cycles taken, interrupts included) for
+// emu_c64 (C64 cycles emulated).  From 0.9-sn11 (phase 2 step 4) its samples can go to the USB audio dongle:
+// audio mode 3 puts them in SnoopSidRing, which the USB interrupt empties 48 a frame (below).
 #if !defined(SNOOP_RESID_H) && defined(__has_include)
 #if __has_include("src/reSID/sid.h")
 #define SNOOP_RESID_H "src/reSID/sid.h"
@@ -78,7 +79,17 @@ FLASHMEM uint32_t SnoopPhi2Hz()
 reSID::SID *SnoopSid = NULL;               // on the heap (RAM2): its filter tables are 16 KB
 uint64_t SnoopSidAt = 0;                   // C64 cycles emulated this run
 DMAMEM short SnoopSidBuf[256];
-void (*SnoopSidSink)(const short *Samples, int n) = NULL;   // where the samples go (the host test only, for now)
+void (*SnoopSidSink)(const short *Samples, int n) = NULL;   // a copy of the samples (the host test)
+
+// The samples for the dongle.  reSID renders up to "now" on each loop pass, in bursts; the USB interrupt takes
+// 48 every 1 ms frame once SnoopSidMs are buffered (the latency, settable in the audio command).  The snoop
+// timeline counts C64 cycles from the Teensy's cycle counter and the USB frames run on the same crystal, so the
+// two rates are the same and nothing is resampled.  After a stall the ring trims back to the target (isoaudio.h).
+#include "src/USBHost_t36/isoaudio.h"
+#define SnoopSidRingSize 8192                // samples: 170 ms, 16 KB in RAM2
+DMAMEM int16_t SnoopSidRingBuf[SnoopSidRingSize];
+isoaudio_ring_t SnoopSidRing;
+bool SnoopSidFeed = false;                   // audio mode 3: the samples go to the ring
 
 FLASHMEM void SnoopSidClockTo(uint64_t Time)
 {
@@ -94,6 +105,7 @@ FLASHMEM void SnoopSidClockTo(uint64_t Time)
       {
          const int n = SnoopSid->clock(d, SnoopSidBuf, (int)(sizeof SnoopSidBuf / sizeof SnoopSidBuf[0]));
          if (SnoopSidSink && n > 0) SnoopSidSink(SnoopSidBuf, n);
+         if (SnoopSidFeed && n > 0) isoaudio_ring_put(&SnoopSidRing, SnoopSidBuf, (uint32_t)n);
       }
    }
    SnoopState.emu_cyc += SnoopCycles() - Start;
@@ -153,8 +165,8 @@ FLASHMEM bool SnoopGetByte(uint8_t *b)
 // src/USBHost_t36, with isochronous OUT added to ehci.cpp) claims a USB Audio Class 1 device that takes 16-bit
 // stereo at 48 kHz, and streams whatever SnoopAudioFill gives it: 48 stereo frames (192 bytes) every 1 ms frame,
 // asked for in the USBHS interrupt (below phi2's priority) a few frames ahead.  The source is silence, or the
-// 1 kHz test tone that command 64 53 03 switches.  Phase 2 step 4 makes reSID the source: 1 ms of the snoop
-// timeline per frame, which runs on the same crystal as the USB frames, so no rate matching is needed.
+// 1 kHz test tone, or (0.9-sn11, phase 2 step 4, an image with reSID) the SID emulator through SnoopSidRing,
+// switched by command 64 53 03.
 #ifndef SNOOP_AUDIO_STUB   // tests/fw_host brings a stand-in
 #include "src/USBHost_t36/USBAudioOut.h"
 #else
@@ -173,6 +185,17 @@ FLASHMEM void SnoopToneSource(uint8_t *Packet, uint32_t Frames)
 {
    isoaudio_tone_packet(&SnoopTone, Packet, Frames);
 }
+
+#ifdef SNOOP_RESID_H
+#define SnoopSidDefaultMs 10
+#define SnoopSidMinMs     2
+#define SnoopSidMaxMs     60
+uint8_t SnoopSidMs = SnoopSidDefaultMs;
+FLASHMEM void SnoopSidSource(uint8_t *Packet, uint32_t Frames)
+{
+   isoaudio_ring_packet(&SnoopSidRing, Packet, Frames);
+}
+#endif
 
 FLASHMEM void SnoopAudioFill(void *, uint8_t *Packet, uint32_t Len)
 {
@@ -206,10 +229,23 @@ FLASHMEM void SnoopAudioDb(Stream *Out, int16_t V)
    Out->printf(PSTR("%s%ld.%ld"), Tenths < 0 ? PSTR("-") : PSTR(""), (long)(A / 10), (long)(A % 10));
 }
 
+// samples at 48 kHz as ms with one decimal, to Out
+FLASHMEM void SnoopAudioMs(Stream *Out, uint32_t Samples)
+{
+   const uint32_t Tenths = (Samples * 10 + 24) / 48;
+   Out->printf(PSTR("%lu.%lu"), (unsigned long)(Tenths / 10), (unsigned long)(Tenths % 10));
+}
+
 FLASHMEM void SnoopAudioReport(Stream *Out)
 {
    USBAudioOut::Info i;
    SnoopDongle.info(&i);
+#ifdef SNOOP_RESID_H
+   if (SnoopAudioSource == SnoopSidSource)
+      Out->printf(PSTR("Snoop audio: SID (reSID 6581), %u ms buffer%s; "), SnoopSidMs,
+                  SnoopState.running ? PSTR("") : PSTR(", no capture running"));
+   else
+#endif
    Out->printf(PSTR("Snoop audio: %s; "), SnoopAudioSource == SnoopToneSource ? PSTR("tone 1000 Hz") : PSTR("silence"));
    if (!i.attached)
    {
@@ -236,23 +272,71 @@ FLASHMEM void SnoopAudioReport(Stream *Out)
    }
    else Out->printf(PSTR("; no feature unit"));
    if (i.failed_step) Out->printf(PSTR("; %s failed"), SnoopAudioStep(i.failed_step));
+#ifdef SNOOP_RESID_H
+   if (SnoopAudioSource == SnoopSidSource)
+   {  // the ring: buffered now, the lowest since the last report (at a packet), underruns, trimmed, dropped
+      const uint32_t Low = SnoopSidRing.low;
+      SnoopSidRing.low = 0xFFFFFFFFu;
+      Out->printf(PSTR("; SID buffered "));
+      SnoopAudioMs(Out, isoaudio_ring_fill(&SnoopSidRing));
+      Out->printf(PSTR(" ms, lowest "));
+      if (Low == 0xFFFFFFFFu) Out->printf(PSTR("-"));
+      else SnoopAudioMs(Out, Low);
+      Out->printf(PSTR(" ms, underruns %lu, trimmed "), (unsigned long)SnoopSidRing.underruns);
+      SnoopAudioMs(Out, SnoopSidRing.trimmed);
+      Out->printf(PSTR(" ms, dropped "));
+      SnoopAudioMs(Out, SnoopSidRing.dropped);
+      Out->printf(PSTR(" ms"));
+   }
+#endif
    Out->printf(PSTR("\n"));
 }
 
-// 64 53 03 mode: 0 silence, 1 the test tone, 2 only report
+// 64 53 03 mode: 0 silence, 1 the test tone, 2 only report, 3 ms: the SID emulator with ms of buffer (0 = 10).
+// The USB interrupt cannot be inside a source while this runs (it preempts the loop, not the other way round),
+// so each source is set up while the pointer is elsewhere and switched in with one store.
 FLASHMEM void SnoopAudioCommand()
 {
-   uint8_t Mode;
+   uint8_t Mode, Ms = 0;
    if (!SnoopGetByte(&Mode)) return;
-   if (Mode > 2)
+   if (Mode == 3 && !SnoopGetByte(&Ms)) return;
+   if (Mode > 3)
    {
       SendU16(FailToken);
-      CmdChannel->printf(PSTR("Snoop audio: mode 0 silence, 1 tone, 2 report\n"));
+      CmdChannel->printf(PSTR("Snoop audio: mode 0 silence, 1 tone, 2 report, 3 SID\n"));
       return;
    }
+#ifndef SNOOP_RESID_H
+   if (Mode == 3)
+   {
+      SendU16(FailToken);
+      CmdChannel->printf(PSTR("Snoop audio: no SID emulator in this build (an -snNr image has reSID)\n"));
+      return;
+   }
+#else
+   if (Mode == 3)
+   {
+      if (Ms == 0) Ms = SnoopSidDefaultMs;
+      if (Ms < SnoopSidMinMs) Ms = SnoopSidMinMs;
+      if (Ms > SnoopSidMaxMs) Ms = SnoopSidMaxMs;
+      if (SnoopAudioSource != SnoopSidSource || Ms != SnoopSidMs)
+      {
+         SnoopAudioSource = NULL;
+         const uint32_t Target = (uint32_t)Ms * (SnoopAudioRate / 1000);
+         isoaudio_ring_init(&SnoopSidRing, SnoopSidRingBuf, SnoopSidRingSize, Target,
+                            Target + (Target > 960 ? Target : 960));   // trim above target + max(target, 20 ms)
+         SnoopSidMs = Ms;
+         SnoopSidFeed = true;
+         SNOOP_BARRIER();
+         SnoopAudioSource = SnoopSidSource;
+      }
+   }
+   if (Mode == 0 || Mode == 1) SnoopSidFeed = false;
+#endif
    if (Mode == 0) SnoopAudioSource = NULL;
    if (Mode == 1 && SnoopAudioSource != SnoopToneSource)
    {
+      SnoopAudioSource = NULL;
       isoaudio_tone_init(&SnoopTone, SnoopToneHz, SnoopAudioRate, SnoopToneAmp);
       SNOOP_BARRIER();   // the tone is ready before the interrupt can see the pointer
       SnoopAudioSource = SnoopToneSource;

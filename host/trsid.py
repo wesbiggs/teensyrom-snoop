@@ -6,6 +6,7 @@
   trsid.py --tcp 192.168.1.50 --no-play --wav x.wav --seconds 30
   trsid.py --replay sid.snoop --wav sid.wav        # a trsnoop.py --raw recording to WAV
   trsid.py --tcp ... --sid D400 --sid D500 --stereo --model 8580
+  trsid.py --tcp 192.168.1.50 --dongle --isr       # also the TeensyROM's own reSID on its USB audio dongle
 
 Needs: pip install pyresidfp numpy (and sounddevice for playing).  The capture is started with
 the SID ranges (each --sid base, $00-$1C), gap 0, so every register write has its own cycle.
@@ -51,6 +52,10 @@ def main():
     ap.add_argument("--send-ms", type=int, default=0, help="how often the TeensyROM sends, ms (default: 20 on USB "
                     "serial, at once on TCP). Every USB transfer briefly stops the bus interrupt: do not go below 20 on USB")
     ap.add_argument("--buffer", type=float, default=0.03, help="live: sound card FIFO target, seconds")
+    ap.add_argument("--dongle", type=int, nargs="?", const=0, metavar="MS",
+                    help="live: the USB audio dongle on the TeensyROM's host port plays its own reSID during the run "
+                    "(an image with reSID, 0.9-sn11r+), with MS of buffer (default 10); --tone/--audio off in "
+                    "trsnoop.py stops it")
     ap.add_argument("--isr", action="store_true", help="live: print the TeensyROM's late bus-interrupt counts every second "
                     "(firmware 0.9-sn3+): a cartridge game misbehaves when '>250ns' climbs; and the CPU share the "
                     "interrupts leave to the main loop (0.9-sn6+)")
@@ -124,8 +129,13 @@ def main():
     if stream:
         stream.start()
 
-    from trsnoop import SerialChan, TcpChan, wait_ack
+    from trsnoop import SerialChan, TcpChan, read_line, wait_ack
     ch = TcpChan(a.tcp, a.tcp_port) if a.tcp else SerialChan(a.port)   # the data port wants the command at once
+    if a.dongle is not None:
+        ch.write(sp.audio_command(sp.AUDIO_SID, a.dongle))
+        ok, rest = wait_ack(ch)       # a refusal (no reSID in the image) is printed; the capture goes on
+        if ok:
+            print("# " + (read_line(ch, rest) or "(no report)"))
     ch.write(sp.start_command([(b, b + 0x1C) for b in bases], 0, a.send_ms))
     ok, rest = wait_ack(ch)
     if not ok:

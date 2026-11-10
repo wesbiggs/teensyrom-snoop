@@ -7,7 +7,7 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
-PROTO_VERSION = 6
+PROTO_VERSION = 7
 
 F_HELLO, F_WRITES, F_STATUS, F_BYE = 0x01, 0x02, 0x03, 0x04
 BYE_REASONS = {0: "stopped", 1: "replaced", 2: "channel"}
@@ -17,6 +17,7 @@ CMD_LEAD = 0x64
 CMD_SNOOP = 0x53            # token 0x6453 ('d' 'S')
 OP_STOP, OP_START, OP_STATUS, OP_AUDIO = 0, 1, 2, 3
 AUDIO_SILENCE, AUDIO_TONE, AUDIO_REPORT = 0, 1, 2   # OP_AUDIO's mode byte (version 6)
+AUDIO_SID = 3                                      # version 7: the on-Teensy SID emulator, then a buffer byte (ms)
 ACK = bytes([0xCC, 0x64])   # AckToken 0x64CC, sent low byte first
 FAIL = bytes([0x7F, 0x9B])  # FailToken 0x9B7F
 
@@ -298,11 +299,17 @@ def status_command() -> bytes:
     return bytes([CMD_LEAD, CMD_SNOOP, OP_STATUS])
 
 
-def audio_command(mode: int) -> bytes:
+def audio_command(mode: int, ms: int = 0) -> bytes:
     """The USB audio dongle on the TeensyROM's host port (version 6, firmware 0.9-sn8+): AUDIO_SILENCE,
-    AUDIO_TONE (1 kHz, -12 dBFS) or AUDIO_REPORT (no change).  Answered with Ack and one line of text."""
-    if mode not in (AUDIO_SILENCE, AUDIO_TONE, AUDIO_REPORT):
-        raise ValueError("mode 0 silence, 1 tone, 2 report")
+    AUDIO_TONE (1 kHz, -12 dBFS) or AUDIO_REPORT (no change); version 7 (0.9-sn11r, an image with reSID):
+    AUDIO_SID, the emulator's output with `ms` of buffer (0 = 10; the firmware clamps to 2-60).  Answered with
+    Ack and one line of text; AUDIO_SID is refused (Fail and a line) by an image without reSID."""
+    if mode not in (AUDIO_SILENCE, AUDIO_TONE, AUDIO_REPORT, AUDIO_SID):
+        raise ValueError("mode 0 silence, 1 tone, 2 report, 3 SID")
+    if mode == AUDIO_SID:
+        if not 0 <= ms <= 255:
+            raise ValueError("ms 0-255")
+        return bytes([CMD_LEAD, CMD_SNOOP, OP_AUDIO, mode, ms])
     return bytes([CMD_LEAD, CMD_SNOOP, OP_AUDIO, mode])
 
 

@@ -212,6 +212,15 @@ static void Loop(int n = 1)
    }
 }
 
+// the text a channel got; one channel of 16-bit stereo packets
+static std::string Text(const Stream &s) { return std::string(s.out.begin(), s.out.end()); }
+static std::vector<int16_t> Samples(const std::vector<uint8_t> &p, int ch)
+{
+   std::vector<int16_t> v;
+   for (size_t i = 0; i + 3 < p.size(); i += 4) v.push_back((int16_t)(p[i + 2 * ch] | p[i + 2 * ch + 1] << 8));
+   return v;
+}
+
 static int Fails = 0;
 #define CHECK(c) do { if (!(c)) { fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #c); Fails++; } } while (0)
 
@@ -369,12 +378,6 @@ int main()
 
    // 10. the USB audio dongle: 64 53 03 mode switches the source between silence and the 1 kHz tone, and reports
    {
-      auto Text = [](const Stream &s) { return std::string(s.out.begin(), s.out.end()); };
-      auto Samples = [](const std::vector<uint8_t> &p, int ch) {
-         std::vector<int16_t> v;
-         for (size_t i = 0; i + 3 < p.size(); i += 4) v.push_back((int16_t)(p[i + 2 * ch] | p[i + 2 * ch + 1] << 8));
-         return v;
-      };
       Stream Au;
       Command(&Au, {0x64, 0x53, 3, 2});                   // report: nothing plugged in
       CHECK(Au.out.size() > 2 && Au.out[0] == 0xCC && Au.out[1] == 0x64);
@@ -442,6 +445,13 @@ int main()
       Au.out.clear();
       Command(&Au, {0x64, 0x53, 3, 7});                   // bad mode: refused, nothing changes
       CHECK(Au.out[0] == 0x7F && Au.out[1] == 0x9B && Text(Au).find("mode 0 silence, 1 tone, 2 report") != std::string::npos);
+#ifndef SNOOP_RESID_H
+      Au.out.clear();
+      Command(&Au, {0x64, 0x53, 3, 3, 10});               // the SID: refused without reSID, its byte still read
+      CHECK(Au.out[0] == 0x7F && Au.out[1] == 0x9B && Text(Au).find("no SID emulator in this build") != std::string::npos);
+      CHECK(SnoopAudioSource == NULL);
+      CHECK(!Au.available());
+#endif
       Au.out.clear();
       Command(&Au, {0x64, 0x53, 3});                      // cut short
       CHECK(Text(Au).find("Timeout!") != std::string::npos);
@@ -460,6 +470,23 @@ int main()
       SnoopSidSink = [](const short *p, int n) { Got.insert(Got.end(), p, p + n); };
       IO1[wRegVid_TOD_Clks] = 0;
       Stream Sid;
+      SnoopDongle.plug();
+      Command(&Sid, {0x64, 0x53, 3, 3, 0});               // the dongle plays the SID, 10 ms buffer (0 = default)
+      CHECK(Text(Sid).find("Snoop audio: SID (reSID 6581), 10 ms buffer, no capture running; 0020:0B21") != std::string::npos);
+      CHECK(SnoopAudioSource == SnoopSidSource && SnoopSidRing.target == 480 && SnoopSidRing.trim_above == 1440);
+      CHECK(SnoopDongle.Frame() == std::vector<uint8_t>(192, 0));   // nothing rendered yet: silence
+      // What the dongle plays: packets taken whenever 10 ms + a packet are buffered (the interrupt keeps up)
+      static std::vector<short> Played;
+      auto Drain = [&]() {
+         while (isoaudio_ring_fill(&SnoopSidRing) >= 480 + 48)
+         {
+            std::vector<uint8_t> p = SnoopDongle.Frame();
+            std::vector<int16_t> L = Samples(p, 0), R = Samples(p, 1);
+            CHECK(L == R);
+            Played.insert(Played.end(), L.begin(), L.end());
+         }
+      };
+      Sid.out.clear();
       Command(&Sid, {0x64, 0x53, 1, 1, 0x00, 0xD4, 0x1C, 0xD4, 0, 0});
       CHECK(SnoopState.on_write == SnoopSidWrite);
       SnoopState.on_write = [](void *c, uint64_t t, uint16_t a, uint8_t d) { SidLog.push_back({t, a, d}); SnoopSidWrite(c, t, a, d); };
@@ -475,8 +502,10 @@ int main()
          if (k % 3 == 2 && Tune[k].first < 0xD41C) { Cycle(Tune[k].first + 1, false, 0x00); Extra++; }   // 1 cycle apart
          ARM_DWT_CYCCNT += 609u * (2000u + 997u * (uint32_t)k);   // the bus idles: up to ~17000 cycles
          Loop(1 + (int)(k % 4));
+         Drain();
       }
       Loop(20);
+      Drain();
       Command(&Sid, {0x64, 0x53, 0});
       Dump("build/fw_sid.bin", Sid);
       // reSID driven directly with what the consumer was given, to the time it emulated
@@ -515,6 +544,27 @@ int main()
       CHECK(Peak > 1000);
       printf("fw_host: SID: %zu writes, %zu samples (%.2f s), peak %d, equal to a direct render: %s\n",
              Writes, Got.size(), Got.size() / 48000.0, Peak, Got == Want ? "yes" : "NO");
+      // the dongle got the same samples, in order, from the first one, in whole packets
+      CHECK(Played.size() >= Got.size() - 480 - 48 && Played.size() % 48 == 0);
+      CHECK(std::equal(Played.begin(), Played.end(), Got.begin()));
+      CHECK(SnoopSidRing.underruns == 0 && SnoopSidRing.trimmed == 0 && SnoopSidRing.dropped == 0);
+      Stream Au;
+      Command(&Au, {0x64, 0x53, 3, 2});
+      const std::string t = Text(Au);
+      CHECK(t.find("Snoop audio: SID (reSID 6581), 10 ms buffer, no capture running; 0020:0B21") != std::string::npos);
+      CHECK(t.find("; SID buffered ") != std::string::npos && t.find(" ms, underruns 0, trimmed 0.0 ms, dropped 0.0 ms\n") != std::string::npos);
+      // the rest plays out, then the last sample is held (no click), counted as one underrun
+      while (isoaudio_ring_fill(&SnoopSidRing) >= 48) SnoopDongle.Frame();
+      std::vector<int16_t> Tail = Samples(SnoopDongle.Frame(), 0);
+      CHECK(Tail.back() == Got.back() && SnoopSidRing.underruns == 1);
+      CHECK(Samples(SnoopDongle.Frame(), 0) == std::vector<int16_t>(48, Got.back()));
+      // a new buffer size: the ring starts again; mode 0 stops the feed
+      Command(&Au, {0x64, 0x53, 3, 3, 200});              // clamped to 60 ms
+      CHECK(SnoopSidMs == 60 && SnoopSidRing.target == 2880 && SnoopSidRing.trim_above == 5760 && SnoopSidRing.underruns == 0);
+      Command(&Au, {0x64, 0x53, 3, 0});
+      CHECK(SnoopAudioSource == NULL && !SnoopSidFeed);
+      SnoopDongle.unplug();
+      printf("fw_host: SID to the dongle: %zu samples in %zu packets, equal to reSID's output\n", Played.size(), Played.size() / 48);
    }
 #endif
 

@@ -32,6 +32,12 @@ class Tone(C.Structure):
     _fields_ = [("phase", C.c_uint32), ("step", C.c_uint32), ("amp", C.c_int32)]
 
 
+class Ring(C.Structure):
+    _fields_ = [("buf", C.POINTER(C.c_int16)), ("mask", C.c_uint32), ("head", C.c_uint32), ("tail", C.c_uint32),
+                ("target", C.c_uint32), ("trim_above", C.c_uint32), ("playing", C.c_uint8), ("last", C.c_int16),
+                ("underruns", C.c_uint32), ("trimmed", C.c_uint32), ("dropped", C.c_uint32), ("low", C.c_uint32)]
+
+
 def lib():
     L = C.CDLL(LIB)
     L.isoaudio_parse_control.argtypes = [C.c_char_p, C.c_uint32, C.POINTER(Control)]
@@ -49,6 +55,12 @@ def lib():
     L.isoaudio_tone_next.argtypes = [C.POINTER(Tone)]
     L.isoaudio_tone_next.restype = C.c_int16
     L.isoaudio_tone_packet.argtypes = [C.POINTER(Tone), C.c_char_p, C.c_uint32]
+    L.isoaudio_ring_init.argtypes = [C.POINTER(Ring), C.POINTER(C.c_int16), C.c_uint32, C.c_uint32, C.c_uint32]
+    L.isoaudio_ring_fill.argtypes = [C.POINTER(Ring)]
+    L.isoaudio_ring_fill.restype = C.c_uint32
+    L.isoaudio_ring_put.argtypes = [C.POINTER(Ring), C.POINTER(C.c_int16), C.c_uint32]
+    L.isoaudio_ring_put.restype = C.c_uint32
+    L.isoaudio_ring_packet.argtypes = [C.POINTER(Ring), C.c_char_p, C.c_uint32]
     return L
 
 
@@ -385,19 +397,109 @@ class TestTone(unittest.TestCase):
         self.assertGreaterEqual(min(s), -32767)
 
 
+class SampleRing(unittest.TestCase):
+    """The ring between reSID in the main loop and the USB interrupt (phase 2 step 4)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.L = lib()
+
+    def ring(self, size=1024, target=480, trim=1440):
+        r = Ring()
+        self.mem = (C.c_int16 * size)()
+        self.L.isoaudio_ring_init(C.byref(r), self.mem, size, target, trim)
+        return r
+
+    def put(self, r, samples):
+        a = (C.c_int16 * max(1, len(samples)))(*samples)
+        return self.L.isoaudio_ring_put(C.byref(r), a, len(samples))
+
+    def packet(self, r, frames=48):
+        buf = C.create_string_buffer(frames * 4 + 4)
+        buf[frames * 4] = b"\xEE"
+        self.L.isoaudio_ring_packet(C.byref(r), buf, frames)
+        self.assertEqual(buf.raw[frames * 4], 0xEE)                     # exactly 4 * frames bytes
+        s = struct.unpack(f"<{frames * 2}h", buf.raw[:frames * 4])
+        self.assertEqual(s[0::2], s[1::2])                              # both channels the same
+        return list(s[0::2])
+
+    def test_waits_for_target_then_plays_in_order(self):
+        r = self.ring()
+        self.assertEqual(self.packet(r), [0] * 48)                      # nothing yet: silence
+        self.put(r, range(1, 480))
+        self.assertEqual(self.packet(r), [0] * 48)                      # 479 < target: still waiting
+        self.assertEqual(r.tail, 0)
+        self.put(r, [480])
+        self.assertEqual(self.packet(r), list(range(1, 49)))
+        self.assertEqual(self.packet(r), list(range(49, 97)))
+        self.assertEqual((r.underruns, r.trimmed, r.dropped, r.low), (0, 0, 0, 432))
+
+    def test_steady_producer_never_underruns_and_wraps(self):
+        r = self.ring(size=1024)
+        got, want, k = [], [], 0
+        for f in range(3000):                                           # 3 s; the producer puts in bursts of 1-5 ms
+            if f % 5 == 0 or f < 10:
+                n = 48 * (5 if f >= 10 else 1)
+                chunk = [((k + i) * 7919) % 65536 - 32768 for i in range(n)]
+                want += chunk
+                k += n
+                self.put(r, chunk)
+            got += self.packet(r)
+        start = got.index(want[0]) if want[0] in got else -1
+        played = got[start:]
+        self.assertEqual(played, want[:len(played)])                    # every sample once, in order, across wraps
+        self.assertGreater(len(played), 2900 * 48)
+        self.assertEqual((r.underruns, r.trimmed, r.dropped), (0, 0, 0))
+
+    def test_underrun_holds_the_last_sample_and_waits_again(self):
+        r = self.ring()
+        self.put(r, [100 + i for i in range(500)])
+        self.packet(r)
+        for _ in range(9):
+            self.packet(r)                                              # 480 played, 20 left
+        p = self.packet(r)
+        self.assertEqual(p[:20], [580 + i for i in range(20)])
+        self.assertEqual(p[20:], [599] * 28)                            # held, not dropped to 0
+        self.assertEqual((r.underruns, r.playing), (1, 0))
+        self.put(r, [7] * 400)
+        self.assertEqual(self.packet(r), [599] * 48)                    # below target again: still holding
+        self.assertEqual(r.underruns, 1)                                # waiting is not another underrun
+        self.put(r, [8] * 80)
+        self.assertEqual(self.packet(r), [7] * 48)
+
+    def test_trims_back_to_target_after_a_stall(self):
+        r = self.ring(size=4096)
+        self.put(r, list(range(2000)))                                  # 41 ms at once: above trim_above (1440)
+        p = self.packet(r)
+        self.assertEqual(p, list(range(1520, 1568)))                    # the newest 480 kept, oldest skipped
+        self.assertEqual(r.trimmed, 1520)
+        self.assertEqual(self.L.isoaudio_ring_fill(C.byref(r)), 432)
+
+    def test_full_ring_drops_what_does_not_fit(self):
+        r = self.ring(size=1024)
+        self.assertEqual(self.put(r, [1] * 1000), 1000)
+        self.assertEqual(self.put(r, [2] * 100), 24)
+        self.assertEqual(r.dropped, 76)
+        self.assertEqual(self.L.isoaudio_ring_fill(C.byref(r)), 1024)
+
+
 class Command(unittest.TestCase):
-    """64 53 03 mode (protocol 6) from the host side: snoopproto and trsnoop.py --tone."""
+    """64 53 03 mode (protocol 6; mode 3, the SID, protocol 7) from the host side: snoopproto, trsnoop.py --tone/--audio."""
 
     def test_bytes(self):
         import sys
         sys.path.insert(0, os.path.join(ROOT, "host"))
         import snoopproto as sp
-        self.assertEqual(sp.PROTO_VERSION, 6)
+        self.assertEqual(sp.PROTO_VERSION, 7)
         self.assertEqual(sp.audio_command(sp.AUDIO_TONE), bytes([0x64, 0x53, 3, 1]))
         self.assertEqual(sp.audio_command(sp.AUDIO_SILENCE), bytes([0x64, 0x53, 3, 0]))
         self.assertEqual(sp.audio_command(sp.AUDIO_REPORT), bytes([0x64, 0x53, 3, 2]))
+        self.assertEqual(sp.audio_command(sp.AUDIO_SID), bytes([0x64, 0x53, 3, 3, 0]))
+        self.assertEqual(sp.audio_command(sp.AUDIO_SID, 25), bytes([0x64, 0x53, 3, 3, 25]))
         with self.assertRaises(ValueError):
-            sp.audio_command(3)
+            sp.audio_command(4)
+        with self.assertRaises(ValueError):
+            sp.audio_command(sp.AUDIO_SID, 256)
 
     def test_trsnoop_tone(self):
         import contextlib
@@ -428,6 +530,11 @@ class Command(unittest.TestCase):
             self.assertFalse(trsnoop.audio(ch, "off"))
         self.assertIn("unknown op", err.getvalue())
         self.assertEqual(ch.sent, bytes([0x64, 0x53, 3, 0]))
+        ch = Chan(b"\x7f\x9bSnoop audio: no SID emulator in this build (an -snNr image has reSID)\n")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertFalse(trsnoop.audio(ch, "sid", 25))               # --audio sid --audio-ms 25
+        self.assertIn("no SID emulator", err.getvalue())
+        self.assertEqual(ch.sent, bytes([0x64, 0x53, 3, 3, 25]))
 
 
 if __name__ == "__main__":

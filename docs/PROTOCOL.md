@@ -1,4 +1,4 @@
-# teensyrom-snoop protocol (version 6)
+# teensyrom-snoop protocol (version 7)
 
 All multi-byte numbers are little-endian unless marked otherwise. `varint` is unsigned LEB128
 (7 bits per byte, low group first, high bit = more).
@@ -22,9 +22,10 @@ listens). The protocol on 6581 is the same; only the port is new, so the version
 | `64 53 00` | **stop** |
 | `64 53 02` | **status**: queue a STATUS frame now |
 | `64 53 03 mode` | **audio** (version 6, firmware 0.9-sn8+): what the USB audio dongle on the TeensyROM's host port plays. `mode` 0 silence, 1 the test tone (1 kHz sine, -12 dBFS, both channels), 2 no change. Answered with Ack and **one line of text** reporting the source and the dongle (below). Works with or without a capture running, on any channel; the tone plays until switched off or the TeensyROM restarts. |
+| `64 53 03 03 ms` | **audio: the SID** (version 7, an image with reSID, 0.9-sn11r+): the dongle plays the TeensyROM's own reSID, the emulator that runs while a capture of `$D400-$D41F` does, with `ms` (u8) of buffer between it and the USB frames (0 = 10; clamped to 2-60). Answered like the other modes. Without a capture the dongle holds its last sample (silence). A build without reSID answers `7F 9B` and `Snoop audio: no SID emulator in this build ...` (the `ms` byte is still read). |
 
 Answer: `CC 64` (AckToken) or `7F 9B` (FailToken) followed by a text line (a refusal; the audio command's report
-after an Ack). The audio command refuses a `mode` above 2. The TeensyROM refuses
+after an Ack). The audio command refuses a `mode` above 3. The TeensyROM refuses
 a start whose ranges cover more than 16 distinct 256-byte pages, a range with `first > last`, or 0 or
 more than 16 ranges; a refused start leaves a running capture alone.
 
@@ -36,22 +37,29 @@ capture stops by itself.
 The audio command's report, for example:
 
 ```
-Snoop audio: tone 1000 Hz; 0020:0B21 interface 2 alt 1 ep 03, streaming; frames 52311, errors 0, missed 0; volume 0/256 dB (-11520..0), unmuted
+Snoop audio: tone 1000 Hz; 0020:0B21 interface 2 alt 1 ep 03, streaming; frames 52311, errors 0, missed 0; volume 0.0 dB (-45.0..0.0), unmuted
+Snoop audio: SID (reSID 6581), 10 ms buffer; 0020:0B21 interface 2 alt 1 ep 03, streaming; frames 90210, errors 0, missed 0; volume 0.0 dB (-60.0..0.0), unmuted; SID buffered 11.2 ms, lowest 9.8 ms, underruns 0, trimmed 0.0 ms, dropped 0.0 ms
 Snoop audio: silence; no USB audio device
 ```
 
-* the source (`tone 1000 Hz` or `silence`), then the device: USB vendor:product, the AudioStreaming interface and
+* the source (`tone 1000 Hz`, `silence`, or `SID (reSID 6581), N ms buffer`, with `, no capture running` when none is), then the device: USB vendor:product, the AudioStreaming interface and
   alternate setting, the endpoint, and `streaming`, `starting` (its setup requests are under way) or `failed`.
 * `frames`, `errors`, `missed`: 1 ms packets sent without an error, packets the host controller flagged (with the last
   siTD status byte), and frames that went out with nothing queued because the refill came too late. Counted
   since the device was plugged in; the counts trail by up to 32 ms (a packet is counted when its slot is reused).
-* the feature unit's volume as set (0 dB clamped into the device's range; 1/256 dB units) and whether it was unmuted,
+* the feature unit's volume as set (0 dB clamped into the device's range; in dB from 0.9-sn9, 1/256 dB units before) and whether it was unmuted,
   or `no feature unit`; `... failed` names a setup request the device refused (the stream starts anyway unless it was
   `SET_INTERFACE`).
 * with nothing plugged in, `no USB audio device`, and in brackets why an audio device that was offered was not taken
   (no 16-bit stereo 48 kHz, an asynchronous sink, packets too small).
+* with the SID as the source (version 7): the emulator's samples waiting for the USB interrupt now (`buffered`), the
+  fewest there were when a packet was taken since the last report (`lowest`, `-` before any; each report restarts
+  it), `underruns` (packets that found fewer than 48: the rest held the last sample, then the buffer filled to its
+  target again before playing on), `trimmed` (samples skipped when the buffer held more than the target + max(target,
+  20 ms), after the main loop stalled), `dropped` (samples that did not fit the 170 ms ring). Counted since mode 3
+  was set (setting it again with another `ms` starts over).
 
-The protocol on the stream is unchanged in version 6: only the command is new (HELLO carries 6).
+The protocol on the stream is unchanged in versions 6 and 7: only the command is new (HELLO carries the version).
 
 ## Stream (TeensyROM to host)
 
@@ -134,7 +142,7 @@ Once a second, on the status command, and before BYE.
   STATUS**: the SID emulator on the TeensyROM took `emu_cyc` CPU cycles, measured on the wall clock (interrupts that
   came in meanwhile included), to emulate `emu_c64` C64 cycles. `emu_cyc / cpu_hz` over `emu_c64 / phi2_hz` is the
   share of the time it takes: it keeps up while that stays well below 1. Both are 0 in a build without reSID.
-  The emulator's output goes nowhere yet (phase 2 step 2, docs/USB-AUDIO.md).
+  From version 7 the emulator's output can go to the USB audio dongle (`64 53 03 03 ms`, phase 2 step 4).
 
 ### BYE `04`
 

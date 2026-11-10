@@ -286,3 +286,80 @@ ISOAUDIO_COLD void isoaudio_tone_packet(isoaudio_tone_t *t, uint8_t *pkt, uint32
       pkt += 4;
    }
 }
+
+/* ---- the sample ring -------------------------------------------------------------------------------------- */
+
+#define RING_BARRIER() __asm__ __volatile__("" ::: "memory")   /* one core: order the stores, nothing more */
+
+ISOAUDIO_COLD void isoaudio_ring_init(isoaudio_ring_t *r, int16_t *buf, uint32_t size, uint32_t target, uint32_t trim_above)
+{
+   memset(r, 0, sizeof *r);
+   r->buf = buf;
+   r->mask = size - 1;
+   r->target = target;
+   r->trim_above = trim_above;
+   r->low = 0xFFFFFFFFu;
+}
+
+ISOAUDIO_COLD uint32_t isoaudio_ring_fill(const isoaudio_ring_t *r)
+{
+   return r->head - r->tail;
+}
+
+ISOAUDIO_COLD uint32_t isoaudio_ring_put(isoaudio_ring_t *r, const int16_t *s, uint32_t n)
+{
+   const uint32_t head = r->head;
+   const uint32_t room = r->mask + 1 - (head - r->tail);
+   if (n > room)
+   {
+      r->dropped += n - room;
+      n = room;
+   }
+   for (uint32_t i = 0; i < n; i++) r->buf[(head + i) & r->mask] = s[i];
+   RING_BARRIER();             /* the samples are in before head says so */
+   r->head = head + n;
+   return n;
+}
+
+ISOAUDIO_COLD void isoaudio_ring_packet(isoaudio_ring_t *r, uint8_t *pkt, uint32_t frames)
+{
+   const uint32_t head = r->head;
+   RING_BARRIER();             /* head before the samples it covers */
+   uint32_t tail = r->tail;
+   uint32_t fill = head - tail;
+   uint32_t n = 0;
+   if (!r->playing && fill >= r->target) r->playing = 1;
+   if (r->playing)
+   {
+      if (fill > r->trim_above)
+      {
+         r->trimmed += fill - r->target;
+         tail += fill - r->target;
+         fill = r->target;
+      }
+      if (fill < r->low) r->low = fill;
+      n = fill < frames ? fill : frames;
+      for (uint32_t i = 0; i < n; i++)
+      {
+         const uint16_t v = (uint16_t)r->buf[(tail + i) & r->mask];
+         pkt[0] = pkt[2] = (uint8_t)v;
+         pkt[1] = pkt[3] = (uint8_t)(v >> 8);
+         pkt += 4;
+      }
+      if (n) r->last = r->buf[(tail + n - 1) & r->mask];
+      if (n < frames)
+      {
+         r->underruns++;
+         r->playing = 0;
+      }
+      RING_BARRIER();          /* done reading before the producer may reuse the space */
+      r->tail = tail + n;
+   }
+   const uint16_t h = (uint16_t)r->last;
+   for (uint32_t i = n; i < frames; i++)
+   {
+      pkt[0] = pkt[2] = (uint8_t)h;
+      pkt[1] = pkt[3] = (uint8_t)(h >> 8);
+      pkt += 4;
+   }
+}

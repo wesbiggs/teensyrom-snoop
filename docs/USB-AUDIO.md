@@ -120,8 +120,11 @@ the emulator to each write's cycle and write the register. That is what `host/si
    refill), no crash, the tone clean, and on port 2112 `frames 339705, errors 0, missed 0`.** The live player's
    latency rose to 299 ms (sn7r: 107 ms), but a shorter run with the dongle unplugged reached 245 ms: the WiFi.
    Unplug and replug (owner): passes. **Step 3 done on hardware** (with the dongle on the host port, no hub).
-   **0.9-sn10** fixes the menu's firmware update with a dongle in (below, step 1); not yet on hardware.
-4. Connect them: the emulator renders into the siTD ring, samples per frame following phi2.
+   **0.9-sn10** fixes the menu's firmware update with a dongle in (below, step 1). **On hardware (owner, 2026-11-09):
+   sn10 updated to itself from the menu with the dongle in and the tone on, and booted.**
+4. Connect them: the emulator renders into the siTD ring, samples per frame following phi2. **In 0.9-sn11r
+   (host-tested, built with Teensyduino 1.61 here; not yet on hardware):** audio mode 3 (protocol 7) sends reSID's
+   samples through a ring to the USB interrupt; see "Step 4 in 0.9-sn11r" and "Trying step 4 on hardware" below.
 5. Compare the dongle's line out with `trsid.py`'s rendering of the same stream (both reSID-family, so the SNR
    test in `tests/test_e2e.py` carries over), recorded through a computer's line in.
 
@@ -173,6 +176,49 @@ touch the library).
   device on the root port (the EHCI way, which the library's interrupt QHs already rely on, with hub address 0 and port
   0); that a siTD's interrupt-on-complete raises the periodic interrupt (UPI; the driver also enables the plain USB
   interrupt, UI, while streaming, in case it does not); that the dongle plays once it has the rate (sn8, without it: streaming, no errors, silent).
+
+## Step 4 in 0.9-sn11r
+
+* **The ring (`isoaudio.{h,c}`, portable, host-tested).** reSID still runs in the main loop, clocked to each captured
+  write and to "now" on every pass (sn7). With audio mode 3 its samples also go into an 8192-sample ring (170 ms,
+  16 KB in RAM2), and the USB interrupt takes 48 a frame. One producer and one consumer on one core: head is
+  stored by the loop, tail by the interrupt, each after its samples (a compiler barrier).
+* **No resampling.** The snoop timeline counts C64 cycles from the Teensy's cycle counter at the nominal phi2, and
+  the USB frames run on the same crystal, so reSID's 48000 samples per second of that timeline are exactly what
+  1000 frames of 48 take. The ring's fill only moves with the loop's bursts.
+* **Latency.** The interrupt waits until `ms` are buffered (default 10, 2-60, in the command), then plays. A packet
+  that finds fewer than 48 plays what is there, **holds the last sample** for the rest (the 6581's output has a DC
+  level: dropping to 0 would click) and waits for the target again (an underrun). Above target + max(target, 20 ms)
+  (the loop caught up after a stall, or the dongle was out) it skips the oldest samples back to the target
+  (trimmed). The dongle's own latency adds the siTD queue's 8 ms.
+* **When it plays.** Only while a capture of `$D400-$D41F` runs: the emulator lives in the capture. `trsid.py
+  --dongle` sends mode 3 and starts the capture together; without a capture the dongle holds its last sample.
+* **Cost.** RAM1 free for locals 69116 in the sn11r image (Teensyduino 1.61, built here), RAM2 53.7 KB of
+  variables (+16 KB for the ring); `isrPHI2` still saves `{r3-r9, sl, fp, lr}`. reSID's CPU is as in sn7r: the ring
+  adds a copy of each sample.
+* **Host tests.** `tests/test_usbaudio.py`: the ring (waits for the target, in order across wraps with a bursty
+  producer, underrun holds and waits, trim after a stall, drops when full). `tests/fw_host` with reSID (`make
+  test-sid`): mode 3 before a capture, the packets the dongle takes equal reSID's own output sample for sample
+  (6912 samples, no underrun, trim or drop), the report, the hold at the end, a new buffer size, mode 0. Without
+  reSID: mode 3 is refused and its byte still read.
+
+## Trying step 4 on hardware (0.9-sn11r)
+
+1. **Flash** `TeensyROM+_0.9-sn11r_full.hex` (built as in the README with `tools/fetch_resid.py`; GPL as a whole).
+   The menu's top line reads `v0.9-sn11r`. The dongle straight on the host port, no hub. The menu update is safe
+   with the dongle in from sn10 on.
+2. **Ms. Pac-Man on the dongle:** launch the game, then `host/trsid.py --tcp <ip> --dongle --isr --no-play` for a
+   few minutes (`--no-play`: only the dongle sounds). The `# Snoop audio: SID ...` line comes first. Expect the game's
+   sound from the dongle, `>250ns` and `>1us` at 0, no crash, and `reSID N%` about sn7r's 26%.
+3. **The buffer's health**, on port 2112 while trsid runs, a few times:
+   `host/trsnoop.py --tcp <ip> --tcp-port 2112 --audio status`. `underruns` should stay 0 and `lowest` above 0;
+   `trimmed` may grow once at the start. If underruns grow, try a larger buffer: `trsid.py ... --dongle 25`.
+4. **Both at once:** the same without `--no-play`: the Mac plays trsid's reSIDfp, ~100-300 ms behind (the WiFi), the
+   dongle reSID, ~20 ms behind the C64. They should sound alike (6581 filters differ a little between the two).
+5. **Stop** trsid: the dongle goes quiet (the last sample held). `--audio off` sets it back to silence.
+
+Report the `--audio status` lines (the SID part), the `--isr` lines (late counts, reSID %, CPU free) and anything
+audible (clicks, dropouts, pitch).
 
 ## Trying it on hardware (0.9-sn9)
 
