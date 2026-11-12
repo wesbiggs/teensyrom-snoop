@@ -36,7 +36,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     g = ap.add_mutually_exclusive_group(required=True)
     g.add_argument("--port", help="TeensyROM USB serial port")
-    g.add_argument("--tcp", help="TeensyROM IP address (TCP 2112)")
+    g.add_argument("--tcp", help="TeensyROM IP address (snoop data port 6581; see --tcp-port)")
     g.add_argument("--replay", help="a file written by trsnoop.py --raw")
     ap.add_argument("--tcp-port", type=int, help="default: the snoop data port 6581, or 2112 when the firmware has none")
     ap.add_argument("--sid", action="append", default=[], help="SID base address, hex (default D400; repeat for more)")

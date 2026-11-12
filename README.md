@@ -8,20 +8,21 @@ through reSIDfp. You hear what the C64 is playing on a C64 with no SID chip at a
 Nothing in the firmware is SID-specific: any 1-16 address ranges (up to 16 distinct 256-byte
 pages) can be watched, for example a second SID at `$D500`, the VIC, or a cartridge's IO1 registers.
 
-## Status
+## What you need
 
-| What | State |
-|---|---|
-| Capture core, wire format, decoder | host-tested (`make test`) |
-| Firmware glue (`WriteSnoop.h/.ino`) | host-tested against stubs; **compiles for the Teensy 4.1** (ARM GCC 13 from GitHub sources, `tools/armcheck`) on its own and together with teensyrom-vdrive |
-| `isrPHI2` cost | same registers saved as stock (checked in the ARM disassembly); a read cycle pays a compare and branch, an unwatched write ~7 instructions |
-| Patch | applies to upstream `6518b966` alone and with teensyrom-vdrive 0.9.0.45 (its HEAD), either order; stock, snoop, vdrive and vdrive + snoop compile for the M7 (`tools/armcheck`) with the same `isrPHI2` saves, and the on-time path is as long as stock's. (Before sn3, `tools/armcheck` silently built the unpatched tree: its earlier results for patched trees were wrong; the CI builds were real.) |
-| Player (`trsid.py`) | renders to WAV; the live path (TCP, real time, `tools/fake_tr.py` as the TeensyROM) matches the offline render (62 dB, no underruns, `make test-live`); not tried on a sound card (the container has none) |
-| End to end with real tunes | three of the TeensyROM's bundled SIDs, played in a 6502 emulator, through the core, the wire and reSIDfp: every write at its exact cycle, audio equal to a direct render |
-| Teensyduino build (GCC 11.3, link, size) | **builds** in CI (`TeensyROM+_0.9_full.hex`; main image RAM1 free for locals 75004, padding 26888). `isrPHI2` saves `{r3-r9, sl, fp, lr}` (already every callee-saved register, so the hook cannot add saves); write cycles branch out to the page-map test; `SnoopTap` stores the entry before `head` |
-| USB audio dongle on the host port (0.9-sn8, phase 2 step 3) | host-tested (`make test`: the owner's dongle's descriptors, siTD words, the frame plan, the 1 kHz tone, command `64 53 03`); compiles for the M7 alone and with teensyrom-vdrive in either order, `isrPHI2` and `SnoopTap` the same code as sn7; builds in CI (Teensyduino 1.61), main image RAM1 free for locals 73276 (sn7 74876). On hardware (owner, sn8): claimed and streaming with no errors, but silent; 0.9-sn9 always sends `SET_CUR` of the rate (sn8 skipped it with one rate listed). **sn9 on hardware (owner): the 1 kHz tone plays** with the dongle on the host port, and with Ms. Pac-Man running (179 s, TCP) no phi2 interrupt >250 ns late, no crash, no missed or failed audio frames, CPU free 42.1% (sn6 43.3%); through a USB 2.0 hub (FE1.1s) it streams silently (parked). Unplug and replug: passes. Step 3 done on hardware. sn8/sn9: unplug the dongle before a firmware update from the TR menu (it faults the update; Teensy Loader recovers); 0.9-sn10 masks the USB host interrupt there (on hardware: works) |
-| reSID on the dongle (0.9-sn11r, phase 2 step 4, protocol 7) | host-tested (`make test`, `make resid test-sid`: the dongle's packets equal reSID's output sample for sample); the sn11r image builds with Teensyduino 1.61 (RAM1 free for locals 69116, `isrPHI2` saves unchanged). **On hardware (owner, sn11r, Ms. Pac-Man, 159 s): sounds great**, no phi2 >250 ns late, no crash, reSID 28% of the time; a few ~50 ms main-loop stalls (not audible). 0.9-sn12r: the dongle's buffer per capture and in STATUS (protocol 8, `trsid.py --isr`), not yet on hardware |
-| Hardware (owner, 2026-11-03, 0.9-sn1) | **works** over TCP and USB serial. TCP over a multi-hop WiFi link gave many late writes at the old 30 ms latency (now 250 ms by default on TCP). USB serial gave ~0 late writes but glitched or crashed cartridge games (Ms. Pac-Man): every USB transfer runs with interrupts off. 0.9-sn2 batches USB sends (20 ms): **Ms. Pac-Man still misbehaves on USB** (owner). 0.9-sn3 on hardware (owner, 2026-11-03): **TCP much better** (late writes in a 30-45 s clip down from thousands, 8000 on one run, to 538, no audible drops). Ms. Pac-Man on USB still crashes; `--isr` over 16 s showed no missed cycles (`>1us` 0), 12 interrupts >250 ns late (8 of them in the second it crashed) and ~265/s small (<250 ns) lateness, ~1500/s during the launch. Next: the same over TCP, the USB cable with no capture, and a capture of an unwritten address |
+- A TeensyROM+, flashed with this patch on top of the pinned upstream TeensyROM (`firmware/UPSTREAM`)
+- To build that firmware: a TeensyROM checkout, Node, and arduino-cli with `teensy:avr@1.61.0` and `CRC32@2.0.1` (see "Building the firmware")
+- A computer with Python 3 that reaches the TeensyROM over Ethernet or USB serial
+- To listen: `pip install pyresidfp numpy sounddevice`. Add `pyserial` for USB serial. `trsnoop.py` alone needs nothing more than that.
+
+## Quick start
+
+```
+host/trsid.py --tcp 192.168.1.50                       # hear the SID, live
+host/trsnoop.py --tcp 192.168.1.50 --range D400-D41C   # or just watch the writes go by
+```
+
+No TeensyROM to hand? `make demo` renders a few of the TeensyROM's bundled tunes through the whole path to `build/demo/*.wav`; it reads them from a TeensyROM checkout (`TEENSYROM=...`).
 
 ## How it works
 
@@ -113,30 +114,10 @@ setting; `trsid.py` prints what it got). Drift between the C64 crystal and the s
 repeating single samples. A write that arrives after its time was played is applied at once, a few ms late, and
 counted ("writes late" at the end). `--isr` lines also show the current delay.
 
-Until this change the default was a fixed 250 ms on TCP (chosen in sn2 for the owner's multi-hop WiFi, where 30 ms
-was far too little). That, not the firmware's Nagle batching (at most one round trip, ~10-20 ms there), made TCP
-play noticeably late. On TCP the TeensyROM's Nagle wait can be replaced by a fixed interval with `--send-ms 4`
-(about 250 small packets a second), which trades some of that round trip for more packets.
-
-**USB serial and cartridge games.** Every USB transfer the Teensy core starts (`schedule_transfer` in its
-`usb.c`) runs with all interrupts off, the bus interrupt included, and each small write starts one. At
-~500 transfers a second, 0.9-sn1 made cartridge games glitch or crash (Ms. Pac-Man) on USB serial, while TCP
-was fine. From 0.9-sn2 the TeensyROM sends at most every 20 ms on USB serial (or once 1 KB is waiting): about
-50 transfers a second. `--send-ms N` changes the interval. Longer is safer for the games, and adds latency.
-**That did not fix Ms. Pac-Man (owner, sn2)**, so the cause is not settled. From 0.9-sn3 the firmware counts
-late phi2 interrupts (any, >250 ns, >1 us), reported in every STATUS and shown live by `trsid.py --isr`. Compare
-USB and TCP while the game runs; if USB's `>250ns` count climbs, the USB path is holding the bus interrupt up.
-
-**Found (owner, 2026-11-03): it is any USB write, not snoop.** Stock firmware answering pings over USB 20 times a
-second gives late `>250ns` interrupts at once and crashes Ms. Pac-Man. A port that is only held open (`cat`) does
-neither, and nor does TCP. Every USB transmit goes through `schedule_transfer()` in the Teensy core's `usb.c`, which
-runs with all interrupts off while it polls USB registers. `tools/teensy_core_usb_basepri.py <cores/teensy4>`
-(experimental; `--revert` undoes it) masks only priority 32 and lower there (`BASEPRI`), so the phi2 interrupt
-(priority 16) keeps running. Patch the installed Teensyduino core, rebuild, rerun the ping test.
-**On hardware (owner, 2026-11-03):** with the patch, no interrupt over USB is late by more than 250 ns, and Ms. Pac-Man
-lasts a minute to several minutes instead of crashing at once. It still crashes eventually, without any late interrupt to
-show for it, so that cause is open. Long runs with no capture and over TCP come next; if only USB crashes, the Mac's
-ground or 5 V through USB is the suspect (try a powered hub or a USB isolator).
+**USB serial and cartridge games.** Every USB write from the TeensyROM, snoop or not, briefly holds off the
+bus interrupt inside the Teensy core, and that can make cartridge games glitch or crash (Ms. Pac-Man). On USB serial
+the TeensyROM sends at most every 20 ms to keep that rare (`--send-ms N` changes it). TCP doesn't have the problem, so
+prefer it. The investigation so far is under "Status and hardware notes".
 
 **Port 6581 (0.9-sn5; 2113 in sn4).** Over TCP the clients connect to snoop's own data port, 6581, and the stream
 stays on that connection. The TeensyROM's port 2112 stays free for other tools during a capture (`trls`, `trvdrive`, file
@@ -158,20 +139,20 @@ and `host/trsid.py --tcp 127.0.0.1`.
 git clone https://github.com/SensoriumEmbedded/TeensyROM && cd TeensyROM
 git checkout $(cat ../teensyrom-snoop/firmware/UPSTREAM)
 git apply ../teensyrom-snoop/firmware/teensyrom-snoop.patch
-python3 ../teensyrom-snoop/tools/stamp_version.py .   # TRVersion 0.9 -> 0.9-sn8
+python3 ../teensyrom-snoop/tools/stamp_version.py .   # TRVersion 0.9 -> 0.9-sn12
 node tools/build-firmware.mjs --target tr-plus      # arduino-cli, teensy:avr@1.61.0, CRC32@2.0.1
 ```
 
-The stamp makes the build obvious: the TR menu's top line reads `TeensyROM+ v0.9-sn8`, and the hex is
-`TeensyROM+_0.9-sn8_full.hex`. The number is `firmware/SNREV`. The stamp is a separate step because
+The stamp makes the build obvious: the TR menu's top line reads `TeensyROM+ v0.9-sn12`, and the hex is
+`TeensyROM+_0.9-sn12_full.hex`. The number is `firmware/SNREV`. The stamp is a separate step because
 teensyrom-vdrive's patch rewrites the same `TRVersion` line. To add teensyrom-vdrive as well, apply its patch
-too (either order), then stamp: `0.9.0.45` becomes `0.9.0.45-sn8`.
+too (either order), then stamp: `0.9.0.45` becomes `0.9.0.45-sn12`.
 
 From sn8 the patch also adds a USB audio output driver to the bundled `src/USBHost_t36/` (isochronous OUT in `ehci.cpp`,
 `USBAudioOut`, `isoaudio`); its sources are `firmware/usbhost/` here (docs/USB-AUDIO.md).
 
 The TeensyROM's host tools read the version with `v[\d.]+` (`tools/lib/trserial.mjs`), so they show the
-part before `-sn1` (`v0.9`). The menu, the serial banner and the file name show all of it.
+part before `-sn12` (`v0.9`). The menu, the serial banner and the file name show all of it.
 
 `tools/make_tr_patch.py /path/to/TeensyROM` regenerates the patch after a change to `core/` or
 `firmware/`. It works from `git archive HEAD` of that checkout and asserts on the upstream text it edits.
@@ -207,7 +188,53 @@ of it.
 the registers `isrPHI2` saves (see the script for the repositories it needs). It also compiles the library sources under
 `src/` that the patches add or change (from sn8: `ehci.cpp`, `USBAudioOut.cpp`, `isoaudio.c`).
 
-## Decisions and assumptions (made while the owner was away; easy to revisit)
+## Status and hardware notes
+
+### Status
+
+| What | State |
+|---|---|
+| Capture core, wire format, decoder | host-tested (`make test`) |
+| Firmware glue (`WriteSnoop.h/.ino`) | host-tested against stubs; **compiles for the Teensy 4.1** (ARM GCC 13 from GitHub sources, `tools/armcheck`) on its own and together with teensyrom-vdrive |
+| `isrPHI2` cost | same registers saved as stock (checked in the ARM disassembly); a read cycle pays a compare and branch, an unwatched write ~7 instructions |
+| Patch | applies to upstream `6518b966` alone and with teensyrom-vdrive 0.9.0.45 (its HEAD), either order; stock, snoop, vdrive and vdrive + snoop compile for the M7 (`tools/armcheck`) with the same `isrPHI2` saves, and the on-time path is as long as stock's. (Before sn3, `tools/armcheck` silently built the unpatched tree: its earlier results for patched trees were wrong; the CI builds were real.) |
+| Player (`trsid.py`) | renders to WAV; the live path (TCP, real time, `tools/fake_tr.py` as the TeensyROM) matches the offline render (62 dB, no underruns, `make test-live`); not tried on a sound card (the container has none) |
+| End to end with real tunes | three of the TeensyROM's bundled SIDs, played in a 6502 emulator, through the core, the wire and reSIDfp: every write at its exact cycle, audio equal to a direct render |
+| Teensyduino build (GCC 11.3, link, size) | **builds** in CI (`TeensyROM+_0.9_full.hex`; main image RAM1 free for locals 75004, padding 26888). `isrPHI2` saves `{r3-r9, sl, fp, lr}` (already every callee-saved register, so the hook cannot add saves); write cycles branch out to the page-map test; `SnoopTap` stores the entry before `head` |
+| USB audio dongle on the host port (0.9-sn8, phase 2 step 3) | host-tested (`make test`: the owner's dongle's descriptors, siTD words, the frame plan, the 1 kHz tone, command `64 53 03`); compiles for the M7 alone and with teensyrom-vdrive in either order, `isrPHI2` and `SnoopTap` the same code as sn7; builds in CI (Teensyduino 1.61), main image RAM1 free for locals 73276 (sn7 74876). On hardware (owner, sn8): claimed and streaming with no errors, but silent; 0.9-sn9 always sends `SET_CUR` of the rate (sn8 skipped it with one rate listed). **sn9 on hardware (owner): the 1 kHz tone plays** with the dongle on the host port, and with Ms. Pac-Man running (179 s, TCP) no phi2 interrupt >250 ns late, no crash, no missed or failed audio frames, CPU free 42.1% (sn6 43.3%); through a USB 2.0 hub (FE1.1s) it streams silently (parked). Unplug and replug: passes. Step 3 done on hardware. sn8/sn9: unplug the dongle before a firmware update from the TR menu (it faults the update; Teensy Loader recovers); 0.9-sn10 masks the USB host interrupt there (on hardware: works) |
+| reSID on the dongle (0.9-sn11r, phase 2 step 4, protocol 7) | host-tested (`make test`, `make resid test-sid`: the dongle's packets equal reSID's output sample for sample); the sn11r image builds with Teensyduino 1.61 (RAM1 free for locals 69116, `isrPHI2` saves unchanged). **On hardware (owner, sn11r, Ms. Pac-Man, 159 s): sounds great**, no phi2 >250 ns late, no crash, reSID 28% of the time; a few ~50 ms main-loop stalls (not audible). 0.9-sn12r: the dongle's buffer per capture and in STATUS (protocol 8, `trsid.py --isr`), not yet on hardware |
+| Hardware (owner, 2026-11-03, 0.9-sn1) | **works** over TCP and USB serial. TCP over a multi-hop WiFi link gave many late writes at the old 30 ms latency (now 250 ms by default on TCP). USB serial gave ~0 late writes but glitched or crashed cartridge games (Ms. Pac-Man): every USB transfer runs with interrupts off. 0.9-sn2 batches USB sends (20 ms): **Ms. Pac-Man still misbehaves on USB** (owner). 0.9-sn3 on hardware (owner, 2026-11-03): **TCP much better** (late writes in a 30-45 s clip down from thousands, 8000 on one run, to 538, no audible drops). Ms. Pac-Man on USB still crashes; `--isr` over 16 s showed no missed cycles (`>1us` 0), 12 interrupts >250 ns late (8 of them in the second it crashed) and ~265/s small (<250 ns) lateness, ~1500/s during the launch. Next: the same over TCP, the USB cable with no capture, and a capture of an unwritten address |
+
+### USB serial and cartridge games
+
+**USB serial and cartridge games.** Every USB transfer the Teensy core starts (`schedule_transfer` in its
+`usb.c`) runs with all interrupts off, the bus interrupt included, and each small write starts one. At
+~500 transfers a second, 0.9-sn1 made cartridge games glitch or crash (Ms. Pac-Man) on USB serial, while TCP
+was fine. From 0.9-sn2 the TeensyROM sends at most every 20 ms on USB serial (or once 1 KB is waiting): about
+50 transfers a second. `--send-ms N` changes the interval. Longer is safer for the games, and adds latency.
+**That did not fix Ms. Pac-Man (owner, sn2)**, so the cause is not settled. From 0.9-sn3 the firmware counts
+late phi2 interrupts (any, >250 ns, >1 us), reported in every STATUS and shown live by `trsid.py --isr`. Compare
+USB and TCP while the game runs; if USB's `>250ns` count climbs, the USB path is holding the bus interrupt up.
+
+**Found (owner, 2026-11-03): it is any USB write, not snoop.** Stock firmware answering pings over USB 20 times a
+second gives late `>250ns` interrupts at once and crashes Ms. Pac-Man. A port that is only held open (`cat`) does
+neither, and nor does TCP. Every USB transmit goes through `schedule_transfer()` in the Teensy core's `usb.c`, which
+runs with all interrupts off while it polls USB registers. `tools/teensy_core_usb_basepri.py <cores/teensy4>`
+(experimental; `--revert` undoes it) masks only priority 32 and lower there (`BASEPRI`), so the phi2 interrupt
+(priority 16) keeps running. Patch the installed Teensyduino core, rebuild, rerun the ping test.
+**On hardware (owner, 2026-11-03):** with the patch, no interrupt over USB is late by more than 250 ns, and Ms. Pac-Man
+lasts a minute to several minutes instead of crashing at once. It still crashes eventually, without any late interrupt to
+show for it, so that cause is open. Long runs with no capture and over TCP come next; if only USB crashes, the Mac's
+ground or 5 V through USB is the suspect (try a powered hub or a USB isolator).
+
+### TCP latency
+
+Before the automatic delay (see "Using it"), the default was a fixed 250 ms on TCP (chosen in sn2 for the owner's multi-hop WiFi, where 30 ms
+was far too little). That, not the firmware's Nagle batching (at most one round trip, ~10-20 ms there), made TCP
+play noticeably late. On TCP the TeensyROM's Nagle wait can be replaced by a fixed interval with `--send-ms 4`
+(about 250 small packets a second), which trades some of that round trip for more packets.
+
+## Design decisions
 
 1. **Default gap 0** (exact times), per the table above. The block grouping stays in the format.
 2. **Token `0x6453`** (`'d' 'S'`) for the command. It is unused upstream (checked at `136baa83` and `6518b966`) and in teensyrom-vdrive
@@ -230,7 +257,7 @@ the registers `isrPHI2` saves (see the script for the repositories it needs). It
    These are the cycles where the earlier snoops end the ISR.
 9. **The player uses reSIDfp through pyresidfp (GPL-2.0+)** as a run-time dependency, not shipped.
    The model defaults to 6581 because the stream does not say which chip (the C64 has none).
-10. **No licence file yet:** that is the owner's call. The TeensyROM is MIT, and the patch adds files under it.
+10. **Licence:** MIT, like the TeensyROM the patch adds files to. reSID and reSIDfp are GPL; see "Licence".
 11. **reSID on the Teensy is fetched at build time, never committed** (owner, 2026-11-07): `tools/fetch_resid.py`.
     reSID 0.16, not 1.0: 1.0 builds large tables in RAM at run time; 0.16's wave tables are constants that can sit
     in flash. Only an image built with it (`-snNr`) is GPL.
@@ -261,3 +288,11 @@ the registers `isrPHI2` saves (see the script for the repositories it needs). It
   0.9-sn9 (on hardware: the tone plays with the dongle on the host port, not through a hub): `trsnoop.py --tone on|off|status`. Step 4, reSID's output on the dongle (`trsid.py --dongle`, `trsnoop.py --audio sid`), is in 0.9-sn11r: **on hardware
   it sounds great** with Ms. Pac-Man. 0.9-sn12r reports the dongle's buffer each second (`trsid.py --isr`) to find
   the few main-loop stalls left.
+
+## Licence
+
+MIT; see [LICENSE](LICENSE). The patch adds files to the TeensyROM, which is MIT as well.
+
+The player uses reSIDfp through pyresidfp, which is GPL-2.0-or-later. It is a run-time dependency that this
+repository does not ship, so the source here stays MIT. Anything built that includes reSID or reSIDfp, such as a
+packaged player that bundles pyresidfp or a phase 2 firmware with reSID on the Teensy, is GPL.
