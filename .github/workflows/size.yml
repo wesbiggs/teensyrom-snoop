@@ -108,6 +108,7 @@ jobs:
             python3 tools/size_report.py $(for d in out/*/; do d=${d%/}; echo "$(basename "$d")=$d"; done)
             echo; cat out/*/heap.txt 2>/dev/null | sed 's/^/* /'
           } | tee size-report.md >> "$GITHUB_STEP_SUMMARY"
+          cat size-report.md   # in the log as well (the summary is not readable everywhere)
           mkdir -p out && cp size-report.md out/
       - uses: actions/upload-artifact@v7
         with:
