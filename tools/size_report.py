@@ -74,6 +74,18 @@ def symbols(path):
     return syms
 
 
+def sections(path):
+    """{section: size} from `size -A`"""
+    out = {}
+    if not os.path.exists(path):
+        return out
+    for line in open(path, errors="replace"):
+        parts = line.split()
+        if len(parts) >= 3 and parts[0].startswith(".") and parts[1].isdigit():
+            out[parts[0]] = int(parts[1])
+    return out
+
+
 def saves(path):
     if not os.path.exists(path):
         return "?"
@@ -144,6 +156,19 @@ def main():
         for sec, key in rows:
             vals = [b[4].get(sec, {}).get(key) for b in builds]
             print(f"| {sec} {key} | " + " | ".join("?" if v is None else fmt(v, vals[0]) for v in vals) + " |")
+
+    secs = [sections(os.path.join(b[1], "main.size")) for b in builds]
+    if any(secs):
+        print("\n## Main image sections (size -A), those that differ\n")
+        print("| section | " + " | ".join(b[0] for b in builds) + " |")
+        print("|---|" + "---|" * len(builds))
+        names = []
+        for s in secs:
+            names += [n for n in s if n not in names]
+        for n in names:
+            vals = [s.get(n, 0) for s in secs]
+            if len(set(vals)) > 1:
+                print(f"| {n} | " + " | ".join(fmt(v, vals[0]) for v in vals) + " |")
 
     print("\n## isrPHI2 prologue (registers saved on every phi2 interrupt)\n")
     for b in builds:
