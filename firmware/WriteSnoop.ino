@@ -67,10 +67,15 @@ FLASHMEM uint32_t SnoopPhi2Hz()
 // loop pass.  STATUS (protocol 5) reports its cost as emu_cyc (CPU cycles taken, interrupts included) for
 // emu_c64 (C64 cycles emulated).  From 0.9-sn11 (phase 2 step 4) its samples can go to the USB audio dongle:
 // audio mode 3 puts them in SnoopSidRing, which the USB interrupt empties 48 a frame (below).
-#if !defined(SNOOP_RESID_H) && defined(__has_include)
+// SnoopNoAudio (not defined in a normal build): leave out the dongle driver, the audio command and reSID,
+// so a build can measure the write tap and its streaming on their own (.github/workflows/size.yml).
+#if !defined(SNOOP_RESID_H) && !defined(SnoopNoAudio) && defined(__has_include)
 #if __has_include("src/reSID/sid.h")
 #define SNOOP_RESID_H "src/reSID/sid.h"
 #endif
+#endif
+#if defined(SNOOP_RESID_H) && defined(SnoopNoAudio)
+#error "SnoopNoAudio leaves out the audio path reSID feeds"
 #endif
 #ifdef SNOOP_RESID_H
 #include SNOOP_RESID_H
@@ -175,6 +180,7 @@ FLASHMEM bool SnoopGetByte(uint8_t *b)
    return true;
 }
 
+#ifndef SnoopNoAudio
 // The USB audio dongle on the host port (0.9-sn8, phase 2 step 3, docs/USB-AUDIO.md).  USBAudioOut (in
 // src/USBHost_t36, with isochronous OUT added to ehci.cpp) claims a USB Audio Class 1 device that takes 16-bit
 // stereo at 48 kHz, and streams whatever SnoopAudioFill gives it: 48 stereo frames (192 bytes) every 1 ms frame,
@@ -377,6 +383,7 @@ FLASHMEM void SnoopAudioCommand()
    SendU16(AckToken);
    SnoopAudioReport(CmdChannel);
 }
+#endif // SnoopNoAudio
 
 // 0x64 0x53, then: 0 stop | 1 start n {first lo,hi, last lo,hi}*n gap flags | 2 status | 3 audio mode
 FLASHMEM void SnoopCommand()
@@ -402,11 +409,13 @@ FLASHMEM void SnoopCommand()
       if (SnoopState.running) snoop_status(&SnoopState);
       return;
    }
+#ifndef SnoopNoAudio
    if (Op == 3)
    {
       SnoopAudioCommand();
       return;
    }
+#endif
    if (Op != 1)
    {
       SendU16(FailToken);

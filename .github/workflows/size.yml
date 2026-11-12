@@ -1,0 +1,115 @@
+name: size
+
+# The memory cost of the snoop patch: TeensyROM+ builds (Teensyduino 1.61, upstream's build script) of the pinned
+# upstream commit without the patch, with the write tap only (SnoopNoAudio), with the USB audio path (the
+# release patch), and with reSID as well (an -snNr image).  tools/size_report.py compares them in the job summary.
+on:
+  push:
+    paths:
+      - .github/workflows/size.yml
+      - tools/size_report.py
+      - firmware/**
+      - core/**
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [1-stock, 2-tap, 3-tap+audio, 4-tap+audio+reSID]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: snoop
+      - name: Pinned upstream
+        id: up
+        run: echo "sha=$(cat snoop/firmware/UPSTREAM)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          repository: SensoriumEmbedded/TeensyROM
+          ref: ${{ steps.up.outputs.sha }}
+          path: tr
+      - name: Patch (${{ matrix.variant }})
+        run: |
+          set -e
+          case "${{ matrix.variant }}" in
+            1-stock) ;;
+            *)
+              git -C tr apply ../snoop/firmware/teensyrom-snoop.patch
+              case "${{ matrix.variant }}" in
+                2-tap)
+                  sed -i 's|^\(\s*#define FeatWriteSnoop\b.*\)$|\1\n   #define SnoopNoAudio //size build: the tap only|' tr/Source/Teensy/TeensyROM.h
+                  grep -n "SnoopNoAudio" tr/Source/Teensy/TeensyROM.h;;
+                4-*)
+                  python3 snoop/tools/fetch_resid.py --tree tr;;
+              esac;;
+          esac
+          git -C tr status --short | head -30
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: tr/.nvmrc
+      - name: Install arduino-cli and the Teensy core
+        working-directory: tr
+        run: |
+          CLI=$(node tools/install-arduino-cli.mjs)
+          if [ "$CLI" != "arduino-cli" ]; then dirname "$CLI" >> "$GITHUB_PATH"; export PATH="$(dirname "$CLI"):$PATH"; fi
+          arduino-cli config init --additional-urls https://www.pjrc.com/teensy/package_teensy_index.json
+          arduino-cli core update-index
+          arduino-cli core install teensy:avr@1.61.0
+          arduino-cli lib install CRC32@2.0.1
+      - name: Build TR+
+        working-directory: tr
+        run: |
+          set -o pipefail
+          node tools/build-firmware.mjs --target tr-plus --keep-work 2>&1 | tee ../build.log
+      - name: Collect
+        run: |
+          set -e
+          V="${{ matrix.variant }}"; O="out/$V"; mkdir -p "$O"
+          RUN=$(dirname "$(find tr/build -name Teensy.ino.elf -path '*/main/*' | head -1)")/..
+          BIN=$(dirname "$(find ~/.arduino15 -name arm-none-eabi-nm | head -1)")
+          cp build.log "$O/build.log"
+          cp "$RUN/main.log" "$O/main.log"; cp "$RUN/minimal.log" "$O/minimal.log"; cp "$RUN/main.size" "$O/main.size"
+          ELF="$RUN/main/Teensy.ino.elf"
+          "$BIN/arm-none-eabi-nm" -S -C "$ELF" > "$O/main.syms"
+          "$BIN/arm-none-eabi-objdump" -d --no-show-raw-insn "$ELF" | awk '/<_Z7isrPHI2v>:/{p=1} p{print; if (/^$/) exit}' > "$O/isr.s"
+          "$BIN/arm-none-eabi-objdump" -d --no-show-raw-insn "$ELF" | awk '/<_Z8SnoopTapt>:/{p=1} p{print; if (/^$/) exit}' >> "$O/isr.s" || true
+          if [ -d tr/Source/Teensy/src/reSID ]; then
+            # reSID::SID lives on the heap (RAM2) from the first capture: its size, for the ARM ABI
+            printf '#include "sid.h"\nchar resid_sid_bytes[sizeof(reSID::SID)];\n' > sz.cpp
+            "$BIN/arm-none-eabi-g++" -mcpu=cortex-m7 -mthumb -mfloat-abi=hard -mfpu=fpv5-d16 -std=gnu++17 -w \
+              -I tr/Source/Teensy/src/reSID -c sz.cpp -o sz.o
+            "$BIN/arm-none-eabi-nm" -S sz.o | awk '{print "reSID::SID heap object: " strtonum("0x" $2) " bytes"}' > "$O/heap.txt"
+            cat "$O/heap.txt"
+          fi
+          grep -E "FLASH:|RAM1:|RAM2:" "$O/main.log"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: size-${{ strategy.job-index }}
+          path: out
+
+  report:
+    needs: build
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: size-*
+          merge-multiple: true
+          path: out
+      - name: Report
+        run: |
+          ls out
+          {
+            python3 tools/size_report.py $(for d in out/*/; do d=${d%/}; echo "$(basename "$d")=$d"; done)
+            echo; cat out/*/heap.txt 2>/dev/null | sed 's/^/* /'
+          } | tee size-report.md >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p out && cp size-report.md out/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: size-report
+          path: out
